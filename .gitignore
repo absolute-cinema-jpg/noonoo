@@ -1,0 +1,7 @@
+# reference images
+01-refs/
+# build output (NooNoo.app, icon renders) - made by build_app.sh
+build/
+__pycache__/
+*.pyc
+.DS_Store

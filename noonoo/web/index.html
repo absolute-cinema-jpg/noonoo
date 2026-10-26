@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NooNoo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/style.css">
+<script>window.TOKEN = "__TOKEN__";</script>
+</head>
+<body data-theme="blue">
+<div id="window">
+
+  <!-- ===== XP title bar ===== -->
+  <div id="titlebar">
+    <span class="tb-icon pywebview-drag-region" data-icon="app16"></span>
+    <span class="tb-title pywebview-drag-region">NooNoo: Enabling Open Media Downloading</span>
+    <div class="tb-buttons">
+      <button class="tb-btn tb-min" data-win="minimize" title="Minimize"></button>
+      <button class="tb-btn tb-max" data-win="maximize" title="Maximize"></button>
+      <button class="tb-btn tb-close" data-win="close" title="Close"></button>
+    </div>
+  </div>
+
+  <!-- ===== menu bar ===== -->
+  <div id="menubar">
+    <div class="menu" data-menu="file"><u>F</u>ile</div>
+    <div class="menu" data-menu="view"><u>V</u>iew</div>
+    <div class="menu" data-menu="nav"><u>N</u>avigation</div>
+    <div class="menu" data-menu="tools"><u>T</u>ools</div>
+    <div class="menu" data-menu="help"><u>H</u>elp</div>
+  </div>
+
+  <!-- ===== main tabs + logo ===== -->
+  <div id="tabbar">
+    <button class="maintab active" data-page="search"><span data-icon="search24"></span>Search</button>
+    <button class="maintab" data-page="monitor"><span data-icon="monitor24"></span>Monitor<b class="badge" id="monitor-badge"></b></button>
+    <button class="maintab" data-page="library"><span data-icon="library24"></span>Library</button>
+    <div class="logo" data-icon="logo"></div>
+  </div>
+
+  <div id="content">
+
+    <!-- ================= SEARCH ================= -->
+    <section class="page active" id="page-search">
+      <aside class="sidebar">
+        <div class="search-box">
+          <div class="sb-title"><span data-icon="search16"></span> Search or paste links</div>
+          <textarea id="q" rows="3" placeholder="Paste a link (YouTube, X, Instagram, TikTok, Facebook, SoundCloud...) or type keywords" spellcheck="false"></textarea>
+          <div class="sb-row">
+            <span class="sb-hint">Keywords search YouTube</span>
+            <button class="xp-btn default" id="go">Search</button>
+          </div>
+          <div class="sb-hint">Tip: &#8984;V anywhere pastes &amp; searches. Several links at once work too.</div>
+        </div>
+        <div class="filter-label">Filter Results:</div>
+        <div class="filters" id="filters"></div>
+        <div class="sidebar-foot">
+          <button class="xp-btn" id="back-to-search">Back To Search</button>
+          <div class="banner">+ 1,800+ sites supported +</div>
+        </div>
+      </aside>
+
+      <div class="main-pane">
+        <div class="result-tabs" id="result-tabs"></div>
+        <div class="table-wrap" id="results-wrap">
+          <div class="empty-state" id="search-empty">
+            <div data-icon="logoBig"></div>
+            <p><b>Paste a link or search to get started.</b></p>
+            <p>Videos, playlists, channels, reels, tweets, tracks &mdash; if a page has media, NooNoo can probably grab it.</p>
+          </div>
+        </div>
+        <div class="action-bar">
+          <button class="bigbtn" id="act-download" disabled><span data-icon="download32"></span>Download</button>
+          <button class="bigbtn" id="act-audio" disabled><span data-icon="audio32"></span>Download Audio</button>
+          <button class="bigbtn" id="act-browse" disabled><span data-icon="browse32"></span>Browse Host</button>
+          <button class="bigbtn" id="act-stop" disabled><span data-icon="stop32"></span>Stop Search</button>
+          <button class="bigbtn" id="act-junk" disabled><span data-icon="junk32"></span>Junk</button>
+          <div class="quick-opts">
+            <label>Quality <select id="quick-video" title="Highest resolution to download"></select></label>
+            <label>Frame rate <select id="quick-fps"></select></label>
+            <label>Video as <select id="quick-vformat" title="File type for video downloads"></select></label>
+            <label>Audio as <select id="quick-audio" title="File type for audio downloads"></select></label>
+            <label class="span2">Save to <select id="quick-folder" title="Where new downloads go"></select></label>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= MONITOR ================= -->
+    <section class="page" id="page-monitor">
+      <div class="pane-title"><span data-icon="monitor16"></span> Downloads <span class="muted" id="dl-summary"></span></div>
+      <div class="table-wrap" id="jobs-wrap"></div>
+      <div class="splitter" id="job-splitter"></div>
+      <div class="details" id="job-details"><div class="muted pad">Select a download to see details.</div></div>
+      <div class="action-bar">
+        <button class="bigbtn" id="job-resume" disabled><span data-icon="resume32"></span>Resume</button>
+        <button class="bigbtn" id="job-pause" disabled><span data-icon="pause32"></span>Pause</button>
+        <button class="bigbtn" id="job-cancel" disabled><span data-icon="stop32"></span>Kill</button>
+        <button class="bigbtn" id="job-retry" disabled><span data-icon="retry32"></span>Retry</button>
+        <button class="bigbtn" id="job-play" disabled><span data-icon="play32"></span>Launch</button>
+        <button class="bigbtn" id="job-reveal" disabled><span data-icon="explore32"></span>Explore</button>
+        <button class="bigbtn" id="job-clear"><span data-icon="clear32"></span>Clear Inactive</button>
+      </div>
+    </section>
+
+    <!-- ================= LIBRARY ================= -->
+    <section class="page" id="page-library">
+      <aside class="sidebar lib-side">
+        <div class="filter-box">
+          <div class="fb-head">Library</div>
+          <ul class="fb-list" id="lib-tree"></ul>
+        </div>
+        <div class="search-box slim">
+          <input id="lib-filter" placeholder="Filter by name..." spellcheck="false">
+        </div>
+        <div class="sidebar-foot">
+          <button class="xp-btn" id="lib-open-folder">Open Folder</button>
+          <div class="muted small" id="lib-root"></div>
+        </div>
+      </aside>
+      <div class="main-pane">
+        <div class="pane-title"><span data-icon="library16"></span> <span id="lib-title">All Downloads</span> <span class="muted" id="lib-summary"></span></div>
+        <div class="table-wrap" id="lib-wrap"></div>
+        <div class="action-bar">
+          <button class="bigbtn" id="lib-play" disabled><span data-icon="play32"></span>Play</button>
+          <button class="bigbtn" id="lib-launch" disabled><span data-icon="launch32"></span>Launch</button>
+          <button class="bigbtn" id="lib-reveal" disabled><span data-icon="explore32"></span>Explore</button>
+          <button class="bigbtn" id="lib-delete" disabled><span data-icon="junk32"></span>Delete</button>
+          <button class="bigbtn" id="lib-refresh"><span data-icon="retry32"></span>Refresh</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ===== status bar ===== -->
+  <div id="statusbar">
+    <span class="sb-cell sb-signal" data-icon="signal" title="Connection"></span>
+    <span class="sb-cell" data-icon="globe16"></span>
+    <span class="sb-cell sb-count" id="sb-count" title="Active downloads">0</span>
+    <span class="sb-cell sb-text" id="sb-text">Ready</span>
+    <span class="sb-cell sb-player">
+      <button class="pl-btn" data-pl="prev" title="Previous"></button>
+      <button class="pl-btn" data-pl="play" title="Play"></button>
+      <button class="pl-btn" data-pl="pause" title="Pause"></button>
+      <button class="pl-btn" data-pl="stop" title="Stop"></button>
+      <button class="pl-btn" data-pl="next" title="Next"></button>
+      <span class="pl-track" id="pl-track"><span>NooNoo Media Player</span></span>
+    </span>
+    <span class="sizegrip" id="sizegrip"></span>
+  </div>
+</div>
+
+<audio id="audio" preload="none"></audio>
+<div id="menus"></div>
+<div id="tooltip" class="xp-tooltip"></div>
+<div id="dialogs"></div>
+
+<script src="/static/icons.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
