@@ -98,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         env["PYTHONPATH"] = resources.path
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["PYTHONUNBUFFERED"] = "1"
+        env["NOONOO_APP"] = Bundle.main.bundlePath      // so the engine can update this copy of the app
         p.environment = env
         let out = Pipe(), stdin = Pipe()
         p.standardOutput = out
@@ -119,6 +120,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
                 if line.hasPrefix("NOONOO_READY ") {
                     let url = String(line.dropFirst("NOONOO_READY ".count))
                     DispatchQueue.main.async { self?.showWindow(url) }
+                } else if line == "NOONOO_QUIT" {           // an update is staged; its helper takes over
+                    DispatchQueue.main.async { NSApp.terminate(nil) }
                 } else if line.hasPrefix("NOONOO_NOTIFY ") {
                     let json = String(line.dropFirst("NOONOO_NOTIFY ".count))
                     DispatchQueue.main.async { self?.notify(json) }
@@ -323,6 +326,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
 
         let app = NSMenu()
         app.addItem(item("About NooNoo", #selector(menuAbout)))
+        app.addItem(item("Check for Updates…", #selector(menuUpdates)))
         app.addItem(.separator())
         app.addItem(item("Settings…", #selector(menuOptions), ","))
         app.addItem(.separator())
@@ -374,6 +378,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     }
 
     @objc func menuAbout() { callMenu("about") }
+    @objc func menuUpdates() { callMenu("updates") }
     @objc func menuOptions() { callMenu("options") }
     @objc func menuSearch() { callMenu("search") }
     @objc func menuMonitor() { callMenu("monitor") }

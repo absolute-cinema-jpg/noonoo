@@ -32,6 +32,7 @@ def main():
     signal.signal(signal.SIGTERM, lambda *a: stop.set())
     if opts.serve:
         engine_mod.NOTIFY_VIA_APP = True
+        app.updater.start_background_checks()
         s = settings_mod.load()
         frame = "xp" if s["xp_frame"] else "native"
         # the app reads this line; when the app quits (or crashes) our stdin closes and we shut down cleanly

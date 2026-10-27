@@ -502,3 +502,26 @@ svg.blink .nn-eyes { animation: nn-blink .38s ease-in-out 1; }
 .quick-opts select:disabled { color: #aca899; background-color: #f5f4ea; }
 .search-box .sb-row { align-items: center; justify-content: space-between; }
 .search-box .sb-row .sb-hint { margin: 0; }
+
+/* XP notification balloon (bottom right, over the status bar) */
+.xp-balloon {
+  position: fixed; right: 40px; bottom: 34px; z-index: 1800; width: 290px; padding: 7px 9px 9px; cursor: pointer;
+  background: #ffffe1; border: 1px solid #000; border-radius: 7px; box-shadow: 2px 3px 6px rgba(0,0,0,.35);
+  animation: balloon-in .25s ease-out;
+}
+.xp-balloon::after { content: ""; position: absolute; right: 36px; bottom: -11px; border: 11px solid transparent;
+  border-top-color: #ffffe1; border-bottom: 0; border-right-width: 0; filter: drop-shadow(0 1px 0 #000); }
+.xp-balloon .bl-head { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+.xp-balloon .bl-head svg { width: 16px; height: 16px; }
+.xp-balloon .bl-head b { flex: 1; }
+.xp-balloon .bl-x { border: 0; background: none; font-size: 15px; line-height: 13px; padding: 0 2px; color: #555; }
+.xp-balloon .bl-x:hover { color: #000; background: #f0f0d0; }
+.xp-balloon .bl-text { padding-left: 22px; }
+@keyframes balloon-in { from { opacity: 0; transform: translateY(8px); } }
+.update-box .up-head { display: flex; gap: 12px; align-items: center; margin-bottom: 10px; }
+.update-box .up-head svg { width: 48px; height: 48px; }
+.update-box .up-title { font-size: 13px; }
+.update-box .up-label { font-weight: bold; margin: 4px 0; }
+.update-box .up-notes { margin: 0; height: 170px; overflow: auto; background: #fff; border: 1px solid var(--list-border); padding: 6px 8px;
+  font: 11px/1.4 var(--font); white-space: pre-wrap; user-select: text; -webkit-user-select: text; }
+.update-box .up-status { margin: 8px 0 6px; min-height: 14px; }

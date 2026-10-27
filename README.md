@@ -67,6 +67,31 @@ used on, and optionally a separate browser profile. By default NooNoo tries ever
 out first and only uses your login if the site refuses. Anything that used your login says so.
 NooNoo never stores cookies and has no analytics or telemetry.
 
+With Chrome, Brave, Edge, Opera or Vivaldi, macOS asks whether *security* (Apple's own Keychain
+tool) may use "Chrome Safe Storage" (or similar). That item is the key the browser locks its cookies
+with. It isn't your saved passwords. You type the password into macOS's window, and NooNoo never
+sees it. **Allow** is the most private choice. **Always Allow** stops the question, but it also lets
+any app that uses the `security` tool read that key.
+
+### Updates
+NooNoo checks for a newer version on launch and every few hours (Options › Behaviour; or
+**NooNoo › Check for Updates…**). When one exists, a balloon pops up over the status bar, and
+**Update Now** does the rest:
+1. It downloads the build for that Mac (Apple Silicon or Intel) and checks its SHA-256 fingerprint.
+2. It quits NooNoo, swaps in the new app (putting the old one back if anything goes wrong), and reopens it.
+3. Downloads that were running carry on afterwards.
+
+The check is one anonymous request for this repo's latest GitHub release (`FEED_REPO` in
+`noonoo/updater.py`).
+
+### Publishing a new version
+```bash
+./release.sh 1.0.3
+```
+This bumps the version, builds the Apple Silicon and Intel apps, tags and pushes, and publishes the
+release on GitHub. Release notes come from the commit messages since
+the last release; to write your own, pass a notes file: `./release.sh 1.0.3 notes.md`. The script refuses to run with uncommitted changes.
+
 ### When a site stops working
 Sites change all the time. **Tools › Update Download Engine** pulls the latest yt-dlp.
 
@@ -74,10 +99,12 @@ Sites change all the time. **Tools › Update Download Engine** pulls the latest
 
 ```
 app/                NooNoo.app source: NooNoo.swift (window shell), Info.plist, icon.svg
-build_app.sh        builds + installs NooNoo.app
+build_app.sh        builds + installs NooNoo.app (--arch=arm64|x86_64|universal, --no-install, --zip)
+release.sh          publishes a new version (see "Publishing a new version")
 noonoo/
   __main__.py         starts the engine (--serve for the app, or opens your browser)
   spotify.py          Spotify links -> matching YouTube uploads
+  updater.py          update check, download + verify, install-and-relaunch helper
   server.py           localhost HTTP API (token + host checked), static UI, media streaming
   engine.py           download queue, yt-dlp process control, progress parsing, search/probe
   tools.py            fetches/updates yt-dlp, ffmpeg, ffprobe, deno

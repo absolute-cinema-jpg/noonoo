@@ -53,6 +53,7 @@ DEFAULTS = {
     "instant_download": False,        # pasting a single URL downloads it straight away
     "default_kind": "video",          # what double-click / Enter downloads
     "notify_done": True,
+    "auto_update_check": True,        # look for a newer NooNoo on launch and every few hours
     "theme": "blue",                  # blue | olive | silver  (the three Luna schemes)
     "thumbs": "small",                # thumbnail column in search results: off | small | large
     "columns": "",                    # JSON: {table: {"order": [...], "hidden": [...]}} from the column chooser

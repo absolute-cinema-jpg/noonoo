@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 from . import engine as engine_mod
 from . import settings as settings_mod
 from . import tools
+from . import updater as updater_mod
 
 WEB_DIR = Path(__file__).parent / "web"
 MEDIA_EXT = {
@@ -26,6 +27,7 @@ TOKEN = secrets.token_urlsafe(24)
 class App:
     def __init__(self):
         self.engine = engine_mod.Engine()
+        self.updater = updater_mod.Updater()
         self.searcher = engine_mod.Searcher()
         self.tool_log = []
         self.tools_busy = False
@@ -156,6 +158,7 @@ def make_handler(app):
             if u.path == "/api/state":
                 snap = app.engine.snapshot()
                 snap["tools_busy"] = app.tools_busy
+                snap["update"] = app.updater.snapshot()
                 return self._send(200, snap)
             if u.path == "/api/job":
                 return self._send(200, app.engine.job((q.get("id") or [""])[0], with_log=True) or {})
@@ -242,6 +245,15 @@ def make_handler(app):
             if path == "/api/search/details":
                 return {"details": app.searcher.details(b.get("id") or "x", [u for u in b.get("urls", []) if u][:10],
                                                         b.get("kind", "video"))}
+            if path == "/api/update/check":
+                return app.updater.check()
+            if path == "/api/update/download":
+                return app.updater.download()
+            if path == "/api/update/skip":
+                app.updater.skip(b.get("version", ""))
+                return app.updater.snapshot()
+            if path == "/api/update/install":
+                return app.updater.install(app.engine)
             if path == "/api/search/cancel":
                 app.searcher.cancel(b.get("id"))
                 return {"ok": True}

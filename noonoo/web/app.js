@@ -418,6 +418,7 @@ const MENUS = {
     { label: "Downloading from Instagram, Facebook & X...", run: cookiesHelp },
     { label: "Keyboard Shortcuts", run: shortcutsHelp },
     "-",
+    { label: "Check for Updates...", run: () => checkUpdates(true) },
     { label: "About NooNoo", run: about },
   ],
 };
@@ -487,7 +488,8 @@ const confirmBox = (title, text, ok = "OK") =>
 function about() {
   api("/api/tools").then((t) => {
     const v = t.status;
-    msgbox("About NooNoo", `<b style="font-size:13px">NooNoo</b> — your own media downloader.
+    const ver = S.stats?.update?.current;
+    msgbox("About NooNoo", `<b style="font-size:13px">NooNoo</b>${ver ? " " + esc(ver) : ""} — your own media downloader.
 Designed and built by <b>${esc(AUTHOR)}</b>.
 
 No limits, no ads. Powered by:
@@ -502,11 +504,34 @@ function cookiesHelp() {
 NooNoo can borrow your login from a browser you already use:
 <b>Tools › Options › Accounts</b> → pick that browser.
 
-• Chrome/Brave/Edge: macOS will ask for Keychain access the first time — click “Always Allow”.
+• Chrome/Brave/Edge: macOS will ask for Keychain access — <a href="#" data-keychain>what that prompt means</a>.
 • Safari: give the terminal / NooNoo “Full Disk Access” in System Settings › Privacy.
 • Firefox works without prompts.
 
 Only use this for content you're allowed to download.`, { icon: "info32" });
+  $$("#dialogs [data-keychain]").pop().onclick = (e) => { e.preventDefault(); keychainHelp(KEYCHAIN_NAMES[S.settings.cookies_browser] ? S.settings.cookies_browser : "chrome"); };
+}
+// Chromium browsers lock their cookies with a key kept in the login Keychain under "<name> Safe Storage".
+const KEYCHAIN_NAMES = { chrome: "Chrome", brave: "Brave", edge: "Microsoft Edge", chromium: "Chromium", opera: "Opera", vivaldi: "Vivaldi" };
+function keychainHelp(browser) {
+  const name = KEYCHAIN_NAMES[browser];
+  if (!name) return;
+  const item = esc(name + " Safe Storage");
+  msgbox("About the Keychain prompt", `When NooNoo first uses your ${esc(name)} login, macOS shows its own window:
+
+  <i>“security wants to use your confidential information stored in “${item}” in your keychain.”</i>
+
+That's expected, and it's safer than it sounds:
+• <b>security</b> is Apple's built-in Keychain tool. yt-dlp uses it to ask macOS for one item, nothing else.
+• <b>${item}</b> is the key ${esc(name)} locks its cookies with. It isn't your saved passwords, card details or Mac password.
+• The password box belongs to macOS, not NooNoo. It wants your Keychain password (usually your Mac password). macOS checks it; NooNoo never sees it.
+
+Which button?
+• <b>Allow</b> — lets it through this once. Most private; macOS asks again next time.
+• <b>Always Allow</b> — no more questions, but any app that uses Apple's security tool could then read this key without asking.
+• <b>Deny</b> — fine too. NooNoo just stays logged out.
+
+Changed your mind? Keychain Access › login › “${item}” › Access Control.`, { icon: "info32" });
 }
 function shortcutsHelp() {
   msgbox("Keyboard Shortcuts", `⌘V            Paste link(s) and search
@@ -540,7 +565,7 @@ function blink(host) {
 // the app's title bar strip belongs to macOS, so the app tells us when the pointer reaches the icon
 window.noonooBlink = (sel) => blink($(sel));
 // app menu bar items (NooNoo › About, Preferences...) call in here
-window.noonooMenu = (cmd) => ({ about, options: () => openOptions(), paste: pasteAndSearch,
+window.noonooMenu = (cmd) => ({ about, options: () => openOptions(), paste: pasteAndSearch, updates: () => checkUpdates(true),
   search: () => showPage("search"), monitor: () => showPage("monitor"), library: () => showPage("library") }[cmd] || (() => {}))();
 function winAction(action) { return native(action); }
 $$("[data-win]").forEach((b) => b.addEventListener("click", () => winAction(b.dataset.win)));
@@ -1284,6 +1309,7 @@ async function poll() {
       renderJobs();
     }
     S.stats = st;
+    updateChanged(st.update);
     renderStatus();
   } catch (e) {
     S.stats = null;
@@ -1296,6 +1322,87 @@ function schedulePoll() {
   clearTimeout(pollTimer);
   const busy = S.stats && (S.stats.active || S.stats.queued);
   pollTimer = setTimeout(() => poll().finally(schedulePoll), busy ? 500 : 1500);
+}
+
+// ================================================================= UPDATES
+// The engine checks GitHub on launch and every few hours; when it finds a newer NooNoo an XP-style
+// balloon pops up over the status bar. One click on Update Now downloads, verifies, restarts.
+let updateBalloonShown = false, updateDialog = null;
+function updateChanged(u) {
+  if (!u) return;
+  if (u.status === "available" && u.latest !== u.skipped && !updateBalloonShown && !updateDialog) {
+    updateBalloonShown = true;
+    balloon(`NooNoo ${u.latest} is available`, "Click here to see what's new and update.", () => showUpdate(u));
+  }
+  if (updateDialog) updateDialog.refresh(u);
+}
+function balloon(title, text, onClick) {
+  $("#balloon")?.remove();
+  const b = document.createElement("div");
+  b.id = "balloon";
+  b.className = "xp-balloon";
+  b.innerHTML = `<div class="bl-head">${icon("info32")}<b>${esc(title)}</b><button class="bl-x" title="Close">×</button></div><div class="bl-text">${esc(text)}</div>`;
+  b.querySelector(".bl-x").onclick = (e) => { e.stopPropagation(); b.remove(); };
+  b.onclick = () => { b.remove(); onClick(); };
+  document.body.appendChild(b);
+  setTimeout(() => b.remove(), 30000);
+}
+async function checkUpdates(manual) {
+  const box = manual ? dialog({ title: "NooNoo Update", cls: "msgbox", body: `<div data-icon="info32"></div><div class="msg">Checking for updates...</div>` }) : null;
+  let u;
+  try { u = await api("/api/update/check", {}); } catch (e) { u = { status: "error", error: e.message }; }
+  if (box) box.close();
+  if (u.status === "available") return showUpdate(u);
+  if (!manual) return;
+  if (u.status === "uptodate") msgbox("NooNoo Update", `You're up to date — NooNoo ${esc(u.current)} is the newest version.`, { icon: "info32" });
+  else msgbox("NooNoo Update", esc(u.error || "Couldn't check for updates."), { icon: "warn32" });
+}
+function showUpdate(u) {
+  if (updateDialog) return;
+  const active = (S.stats?.active || 0) + (S.stats?.queued || 0);
+  const body = document.createElement("div");
+  body.className = "update-box";
+  body.innerHTML = `<div class="up-head">${icon("logoBig")}<div><b class="up-title">NooNoo ${esc(u.latest)} is available</b>
+      <div class="muted">You have ${esc(u.current || "an older version")}.${u.size ? " Download size " + fmt.size(u.size) + "." : ""}</div></div></div>
+    <div class="up-label">What's new:</div><pre class="up-notes">${esc(u.notes || "No release notes.")}</pre>
+    <div class="up-status muted">${u.can_install ? (active ? `${active} download${active === 1 ? "" : "s"} will pause while NooNoo restarts, then carry on.` : "NooNoo will restart to finish updating.")
+                                     : "Updating needs the NooNoo app; in a browser, download it from the release page."}</div>
+    <div class="xp-progress hidden"><i style="width:0%"></i><span class="pct"></span></div>`;
+  const d = dialog({
+    title: "NooNoo Update", body, width: 520, onClose: () => { updateDialog = null; },
+    buttons: u.can_install ? [
+      { label: "Skip This Version", left: true, run: () => api("/api/update/skip", { version: u.latest }) },
+      { label: "Update Now", default: true, keepOpen: true, run: () => startUpdate() },
+      { label: "Remind Me Later" },
+    ] : [{ label: "Open Download Page", default: true, run: () => openUrl(u.page) }, { label: "Later" }],
+  });
+  const status = $(".up-status", d.el), bar = $(".xp-progress", d.el);
+  let installing = false;
+  async function startUpdate() {
+    $$(".xw-foot .xp-btn", d.el).forEach((b) => (b.disabled = true));
+    bar.classList.remove("hidden");
+    status.textContent = "Downloading...";
+    await api("/api/update/download", {}).catch(() => {});
+  }
+  updateDialog = {
+    refresh(s) {
+      if (s.status === "downloading") {
+        $("i", bar).style.width = s.progress + "%";
+        $(".pct", bar).textContent = Math.floor(s.progress) + "%";
+      } else if (s.status === "ready" && !installing) {
+        installing = true;
+        $("i", bar).style.width = "100%";
+        status.textContent = "Verified. Restarting NooNoo...";
+        api("/api/update/install", {}).then((r) => {
+          if (!r.ok) { status.textContent = r.error; $$(".xw-foot .xp-btn", d.el).forEach((b) => (b.disabled = false)); }
+        }).catch(() => {});   // the app quits mid-request when all is well
+      } else if (s.status === "available" && s.error && !bar.classList.contains("hidden")) {
+        status.textContent = s.error;
+        bar.classList.add("hidden");
+        $$(".xw-foot .xp-btn", d.el).forEach((b) => (b.disabled = false));
+      }
+    },
+  };
 }
 
 function renderStatus(err) {
@@ -1393,6 +1500,8 @@ const OPTION_PAGES = [
     { key: "default_kind", label: "Double-click / Enter downloads", type: "select", options: [["video", "Video"], ["audio", "Audio only"]] },
     { key: "instant_download", label: "Pasting a single link downloads it immediately (skip results list)", type: "check" },
     { key: "notify_done", label: "Show a notification when a download finishes", type: "check" },
+    { key: "auto_update_check", label: "Check for new versions of NooNoo automatically", type: "check",
+      help: "One anonymous request to GitHub on launch and every few hours. Help › Check for Updates works either way." },
     { key: "search_results", label: "Keyword search results", type: "number", min: 5, max: 200 },
     { key: "fetch_details", label: "Look up upload date, resolution and size for each search result (one extra request per result)", type: "check" },
     { key: "playlist_items_limit", label: "Max items to list from playlists / channels", type: "number", min: 10, max: 5000 },
@@ -1410,7 +1519,8 @@ const OPTION_PAGES = [
         <li>They're only offered to the sites ticked above, and each site only receives its own cookies.</li>
         <li>In “only when refused” mode every download is tried logged out first, so sites only learn who you are when they insist.</li>
         <li>Every download and search that used your login says so (Monitor › details, and a green note on search results).</li>
-        <li>NooNoo has no accounts, analytics or telemetry. It only talks to the sites you download from, and to GitHub when you update the engine.</li>
+        <li>Chrome, Brave, Edge and friends: macOS asks for your Keychain password in its own window. NooNoo never sees it. <a href="#" data-keychain>What that prompt means</a></li>
+        <li>NooNoo has no accounts, analytics or telemetry. It only talks to the sites you download from, and to GitHub to check for updates (Options › Behaviour) and fetch the engine.</li>
       </ul></div>` },
   ] },
   { id: "network", label: "Network", icon: "globe16", fields: [
@@ -1509,6 +1619,7 @@ function openOptions(startPage) {
   wrap.addEventListener("click", async (e) => {
     const nav = e.target.closest(".opts-nav [data-p]");
     if (nav) return show(nav.dataset.p);
+    if (e.target.closest("[data-keychain]")) { e.preventDefault(); return keychainHelp(KEYCHAIN_NAMES[draft.cookies_browser] ? draft.cookies_browser : "chrome"); }
     const br = e.target.closest("[data-browse]");
     if (br) {
       const r = { path: await pickFolder(draft[br.dataset.browse]) };
@@ -1565,6 +1676,7 @@ function openOptions(startPage) {
     const k = t.dataset.k;
     if (!k) return;
     draft[k] = t.type === "checkbox" ? t.checked : t.type === "number" ? Number(t.value) : t.value;
+    if (k === "cookies_browser") keychainHelp(t.value);
     if (k === "theme") {
       document.body.dataset.theme = t.value;
       $$(".theme-swatches label", pane).forEach((l) => l.classList.toggle("sel", $("input", l).checked));

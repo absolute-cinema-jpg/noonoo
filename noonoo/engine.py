@@ -442,6 +442,7 @@ class Engine:
                 self.order.append(j.id)
         except (OSError, ValueError, KeyError):
             pass
+        self._resume_after_update()
         if TEMP_DIR.is_dir():  # workspaces of jobs that no longer exist
             for d in TEMP_DIR.iterdir():
                 if d.name not in self.jobs:
@@ -563,6 +564,28 @@ class Engine:
                 self.action(jid, "pause")
             elif act == "resume_all" and status == "paused":
                 self.action(jid, "resume")
+
+    def remember_for_update(self, path):
+        """Note which downloads are running or queued, so they carry on once the updated app opens."""
+        with self.lock:
+            ids = [i for i in self.order if self.jobs[i].status in ACTIVE + ("queued",)]
+        try:
+            path.write_text(json.dumps(ids))
+        except OSError:
+            pass
+
+    def _resume_after_update(self):
+        from .updater import RESUME_FILE
+        try:
+            ids = json.loads(RESUME_FILE.read_text())
+            RESUME_FILE.unlink()
+        except (OSError, ValueError):
+            return
+        for jid in ids:
+            j = self.jobs.get(jid)
+            if j and j.status == "paused":
+                self._reset(j)
+        threading.Timer(2, self._pump).start()
 
     def shutdown(self):
         with self.lock:
@@ -1026,12 +1049,10 @@ _FILENAME_SWAPS = str.maketrans({"/": "⧸", "\\": "⧹", ":": "：", "*": "＊"
 
 
 def song_filename(s, tags, fallback):
-    """'Title', or 'Artist - Title' when the file name pattern includes the uploader/artist."""
-    title = (tags.get("title") or "").strip()
-    if not title:
+    """Just the Spotify song title - never the YouTube upload's title, artist or id."""
+    name = (tags.get("title") or "").strip()
+    if not name:
         return os.path.splitext(fallback)[0]
-    t = s["filename_template"]
-    name = "%s - %s" % (tags["artist"], title) if tags.get("artist") and ("%(uploader" in t or "%(artist" in t) else title
     if s["restrict_filenames"]:
         name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
         name = re.sub(r"[^\w.-]+", "_", name).strip("_.")
