@@ -3,8 +3,9 @@
 # offers a one-click update.
 #   ./release.sh 1.0.3              release notes = commit messages since the last release
 #   ./release.sh 1.0.3 notes.md     ...or your own notes (Markdown)
-# Steps: bump the version, build Apple Silicon + Intel apps, commit + tag + push, then publish the
-# release to this repo and (if it's a different one) to the public feed repo named in noonoo/updater.py.
+# Steps: bump the version, build Apple Silicon + Intel apps, sign them, commit + tag + push, then publish
+# the release to this repo and (if it's a different one) to the public feed repo named in noonoo/updater.py.
+# Copies of NooNoo only install updates signed with the key from ./make_update_key.sh.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -17,6 +18,21 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
 fi
 if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
   echo "v$VERSION already exists." >&2
+  exit 1
+fi
+
+OPENSSL=/usr/bin/openssl
+SIGNING_KEY="${NOONOO_SIGNING_KEY:-$HOME/.config/noonoo/update-signing-key.pem}"
+PUBLIC_KEY=noonoo/update_key.pem
+if [ ! -f "$SIGNING_KEY" ] || ! git ls-files --error-unmatch "$PUBLIC_KEY" >/dev/null 2>&1; then
+  echo "No update key. Run ./make_update_key.sh and commit $PUBLIC_KEY first." >&2
+  exit 1
+fi
+read -r -s -p "Passphrase for the update signing key: " NOONOO_SIGN_PASS; echo
+export NOONOO_SIGN_PASS
+# Catch a wrong key or passphrase now, before anything is built or bumped.
+if ! "$OPENSSL" ec -in "$SIGNING_KEY" -passin env:NOONOO_SIGN_PASS -pubout 2>/dev/null | cmp -s - "$PUBLIC_KEY"; then
+  echo "The passphrase is wrong, or that key doesn't match $PUBLIC_KEY." >&2
   exit 1
 fi
 FEED=$(python3 -c "import re; print(re.search(r'FEED_REPO = \"([^\"]+)\"', open('noonoo/updater.py').read()).group(1))")
@@ -38,6 +54,13 @@ BUILD_NUMBER=$(( $(/usr/libexec/PlistBuddy -c "Print CFBundleVersion" app/Info.p
 ./build_app.sh --arch=arm64 --no-install --zip
 ./build_app.sh --arch=x86_64 --no-install --zip
 ZIPS=("build/NooNoo-$VERSION-macOS-Apple-Silicon.zip" "build/NooNoo-$VERSION-macOS-Intel.zip")
+ASSETS=()
+for zip in "${ZIPS[@]}"; do
+  "$OPENSSL" dgst -sha256 -sign "$SIGNING_KEY" -passin env:NOONOO_SIGN_PASS -out "$zip.sig" "$zip"
+  "$OPENSSL" dgst -sha256 -verify "$PUBLIC_KEY" -signature "$zip.sig" "$zip" >/dev/null
+  ASSETS+=("$zip" "$zip.sig")
+done
+unset NOONOO_SIGN_PASS
 
 if [ -z "$NOTES" ]; then
   NOTES="build/notes-$VERSION.md"
@@ -56,8 +79,8 @@ fi
 git tag -a "v$VERSION" -m "NooNoo $VERSION"
 git push -q origin HEAD "v$VERSION"
 
-gh release create "v$VERSION" "${ZIPS[@]}" --repo "$SOURCE" --title "NooNoo $VERSION" --notes-file "$NOTES" --latest
+gh release create "v$VERSION" "${ASSETS[@]}" --repo "$SOURCE" --title "NooNoo $VERSION" --notes-file "$NOTES" --latest
 if [ "$FEED" != "$SOURCE" ]; then
-  gh release create "v$VERSION" "${ZIPS[@]}" --repo "$FEED" --title "NooNoo $VERSION" --notes-file "$NOTES" --latest
+  gh release create "v$VERSION" "${ASSETS[@]}" --repo "$FEED" --title "NooNoo $VERSION" --notes-file "$NOTES" --latest
 fi
 echo "Published NooNoo $VERSION - copies of NooNoo will offer the update within a few hours (or on next launch)."

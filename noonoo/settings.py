@@ -1,5 +1,6 @@
 """User options, persisted as JSON next to the tools."""
 import json
+import shlex
 import threading
 from pathlib import Path
 
@@ -74,7 +75,63 @@ COOKIE_SITES = {
     "patreon": ("Patreon", ["patreon.com"]),
 }
 
+# yt-dlp options people may add under Advanced, and whether each takes a value. An allowlist,
+# because several other options run commands (--exec, --use-postprocessor, --netrc-cmd), load
+# code (--plugin-dirs, --ffmpeg-location, --config-locations) or read and write arbitrary files,
+# and yt-dlp also accepts unambiguous abbreviations of all of them (--exe).
+EXTRA_ARGS = {
+    **dict.fromkeys((
+        "--no-mtime", "--mtime", "--write-description", "--write-info-json", "--write-comments", "--write-thumbnail",
+        "--write-all-thumbnails", "--write-subs", "--write-auto-subs", "--embed-subs", "--embed-thumbnail",
+        "--embed-metadata", "--embed-chapters", "--embed-info-json", "--no-embed-subs", "--no-embed-thumbnail",
+        "--no-embed-metadata", "--no-embed-chapters", "--no-embed-info-json", "--no-playlist", "--yes-playlist",
+        "--force-ipv4", "--force-ipv6", "--check-formats", "--no-check-formats", "--prefer-free-formats",
+        "--no-prefer-free-formats", "--no-part", "--continue", "--no-continue", "--ignore-errors",
+        "--no-abort-on-error", "--abort-on-error", "--no-overwrites", "--force-overwrites", "--verbose", "--quiet",
+        "--no-warnings", "--audio-multistreams", "--video-multistreams", "--no-audio-multistreams",
+        "--no-video-multistreams", "--live-from-start", "--no-live-from-start", "--xattrs", "--split-chapters",
+        "--no-split-chapters", "--keep-video", "--no-keep-video", "--extract-audio",
+    ), False),
+    **dict.fromkeys((
+        "--format", "--format-sort", "--merge-output-format", "--remux-video", "--recode-video", "--audio-format",
+        "--audio-quality", "--sub-format", "--sub-langs", "--convert-subs", "--convert-thumbnails", "--limit-rate",
+        "--throttled-rate", "--retries", "--fragment-retries", "--concurrent-fragments", "--sleep-interval",
+        "--max-sleep-interval", "--sleep-requests", "--sleep-subtitles", "--min-filesize", "--max-filesize", "--date",
+        "--datebefore", "--dateafter", "--match-filters", "--playlist-items", "--max-downloads", "--socket-timeout",
+        "--user-agent", "--referer", "--add-headers", "--source-address", "--impersonate", "--extractor-args",
+        "--sponsorblock-remove", "--sponsorblock-mark", "--wait-for-video",
+    ), True),
+}
+_EXTRA_ARGS_SHORT = {"-f": "--format", "-S": "--format-sort", "-N": "--concurrent-fragments", "-r": "--limit-rate",
+                     "-R": "--retries", "-v": "--verbose", "-q": "--quiet", "-i": "--ignore-errors", "-x": "--extract-audio"}
+
 _lock = threading.Lock()
+
+
+def split_extra_args(text):
+    """Split the Advanced box into (allowed tokens, refused options)."""
+    try:
+        tokens = shlex.split(text or "")
+    except ValueError:
+        return [], [text]
+    allowed, refused, i = [], [], 0
+    while i < len(tokens):
+        token = tokens[i]
+        i += 1
+        name, eq, _value = token.partition("=") if token.startswith("--") else (token, "", "")
+        name = _EXTRA_ARGS_SHORT.get(name, name)
+        if name not in EXTRA_ARGS or (eq and not EXTRA_ARGS[name]):
+            refused.append(token)
+            continue
+        allowed.append(token)
+        if EXTRA_ARGS[name] and not eq:  # the next token is this option's value
+            if i >= len(tokens) or tokens[i].startswith("-"):
+                refused.append(token)
+                allowed.pop()
+                continue
+            allowed.append(tokens[i])
+            i += 1
+    return allowed, refused
 
 
 def load():
@@ -112,6 +169,10 @@ def save(data):
         except (TypeError, ValueError):
             v = default
         clean[k] = v
+    refused = split_extra_args(clean["extra_args"])[1]
+    if refused and clean["extra_args"] != load()["extra_args"]:
+        raise ValueError("NooNoo can't pass these yt-dlp options, because options like them can run programs "
+                         "or change files: %s" % " ".join(refused))
     with _lock:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         tmp = SETTINGS_FILE.with_suffix(".tmp")

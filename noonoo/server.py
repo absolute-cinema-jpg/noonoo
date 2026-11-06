@@ -22,6 +22,10 @@ MEDIA_EXT = {
     "video": {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".m4v", ".ts", ".3gp", ".mxf"},
 }
 TOKEN = secrets.token_urlsafe(24)
+# Remote images are search thumbnails. Scripts must be ours, so injected markup can't run code.
+CSP = ("default-src 'none'; script-src 'self' 'nonce-%s'; style-src 'self' 'unsafe-inline'; "
+       "img-src 'self' data: https: http:; media-src 'self'; connect-src 'self'; font-src 'self'; "
+       "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 
 
 class App:
@@ -120,6 +124,8 @@ def make_handler(app):
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
             for k, v in (headers or {}).items():
                 self.send_header(k, v)
             self.end_headers()
@@ -146,11 +152,12 @@ def make_handler(app):
             if u.path == "/":
                 if not self._authed(q):
                     return self._send(403, "Forbidden", "text/plain")
-                html = (WEB_DIR / "index.html").read_text().replace("__TOKEN__", TOKEN)
-                return self._send(200, html, "text/html; charset=utf-8")
+                nonce = secrets.token_urlsafe(16)
+                html = (WEB_DIR / "index.html").read_text().replace("__TOKEN__", TOKEN).replace("__NONCE__", nonce)
+                return self._send(200, html, "text/html; charset=utf-8", {"Content-Security-Policy": CSP % nonce})
             if u.path.startswith("/static/"):
                 f = (WEB_DIR / u.path[len("/static/"):]).resolve()
-                if not str(f).startswith(str(WEB_DIR.resolve())) or not f.is_file():
+                if WEB_DIR.resolve() not in f.parents or not f.is_file():
                     return self._send(404, {"error": "not found"})
                 return self._send(200, f.read_bytes(), mimetypes.guess_type(str(f))[0] or "application/octet-stream")
             if not self._authed(q):

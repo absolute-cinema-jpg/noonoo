@@ -1192,7 +1192,10 @@ def build_args(j, s, with_login=False):
         a.append("--embed-metadata")
     if s["sponsorblock"]:
         a += ["--sponsorblock-remove", "sponsor,selfpromo,interaction"]
-    if s["extra_args"].strip():
-        a += shlex.split(s["extra_args"])
+    # save() refuses these, but settings.json can be edited, or predate the allowlist.
+    extra, refused = settings_mod.split_extra_args(s["extra_args"])
+    a += extra
+    if refused:
+        j.log.append("Ignored extra yt-dlp options NooNoo doesn't allow: " + " ".join(refused))
     a += ["--", j.url]
     return a

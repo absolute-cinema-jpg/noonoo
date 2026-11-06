@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     var engine: Process?
     var engineStdin: Pipe?
     var xpFrame = true
+    var enginePort: Int?
     var quitting = false
     var overTitleIcon = false
     let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/NooNoo.log")
@@ -158,12 +159,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
 
     func showWindow(_ urlString: String) {
         guard window == nil, let url = URL(string: urlString) else { return }
+        enginePort = url.port
         xpFrame = urlString.contains("frame=xp")
 
         let config = WKWebViewConfiguration()
         config.userContentController.add(self, name: "noonoo")
         config.mediaTypesRequiringUserActionForPlayback = []
+        #if DEBUG
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        #endif
 
         var style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
         if xpFrame { style.insert(.fullSizeContentView) }
@@ -304,14 +308,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = action.request.url else { return decisionHandler(.cancel) }
-        if url.host == "127.0.0.1" || url.scheme == "about" { return decisionHandler(.allow) }
-        NSWorkspace.shared.open(url)
+        if (url.host == "127.0.0.1" && url.port == enginePort) || url.absoluteString == "about:blank" {
+            return decisionHandler(.allow)
+        }
+        openInBrowser(url)
         decisionHandler(.cancel)
+    }
+
+    // Web links only: other schemes can launch apps or open local files.
+    func openInBrowser(_ url: URL) {
+        guard let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http" else { return }
+        NSWorkspace.shared.open(url)
     }
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if let url = action.request.url { NSWorkspace.shared.open(url) }
+        if let url = action.request.url { openInBrowser(url) }
         return nil
     }
 

@@ -15,6 +15,11 @@ The first launch downloads the engine (yt-dlp, ffmpeg, ffprobe, deno, about 120 
 `~/Library/Application Support/NooNoo/bin`. Nothing is installed system-wide. macOS will ask once
 whether NooNoo may use your Downloads folder.
 
+Each tool is verified before it replaces anything, including when you update it: deno, ffmpeg and
+ffprobe must carry their publisher's Apple Developer ID signature, and yt-dlp must match the checksums
+yt-dlp signs with its PGP key. If yt-dlp ever changes that key, updates fail with a message and keep
+the working copy until a new NooNoo release pins the new key.
+
 The app is a small native window (Swift + WebKit). It runs NooNoo's Python engine, using the
 built-in macOS `python3`, as a hidden helper. Prefer a browser? Run `python3 -m noonoo`. Engine
 errors are written to `~/Library/Logs/NooNoo.log`.
@@ -77,7 +82,8 @@ any app that uses the `security` tool read that key.
 NooNoo checks for a newer version on launch and every few hours (Options › Behaviour; or
 **NooNoo › Check for Updates…**). When one exists, a balloon pops up over the status bar, and
 **Update Now** does the rest:
-1. It downloads the build for that Mac (Apple Silicon or Intel) and checks its SHA-256 fingerprint.
+1. It downloads the build for that Mac (Apple Silicon or Intel) and checks its signature against the
+   release key built into the app. An unsigned or wrongly signed build is refused, even from this repo.
 2. It quits NooNoo, swaps in the new app (putting the old one back if anything goes wrong), and reopens it.
 3. Downloads that were running carry on afterwards.
 
@@ -85,12 +91,24 @@ The check is one anonymous request for this repo's latest GitHub release (`FEED_
 `noonoo/updater.py`).
 
 ### Publishing a new version
+Once, before your first signed release, create the signing key and commit its public half:
+```bash
+./make_update_key.sh
+git add noonoo/update_key.pem && git commit -m "Add update signing key"
+```
+The private key stays in `~/.config/noonoo` behind a passphrase. Back up both somewhere safe, such as a
+password manager: without them you can't sign updates, and everyone would have to reinstall by hand.
+
 ```bash
 ./release.sh 1.0.3
 ```
-This bumps the version, builds the Apple Silicon and Intel apps, tags and pushes, and publishes the
-release on GitHub. Release notes come from the commit messages since
+This bumps the version, builds and signs the Apple Silicon and Intel apps, tags and pushes, and publishes
+the release on GitHub. Release notes come from the commit messages since
 the last release; to write your own, pass a notes file: `./release.sh 1.0.3 notes.md`. The script refuses to run with uncommitted changes.
+
+### Extra yt-dlp arguments
+Options › Advanced accepts a fixed list of harmless options (`EXTRA_ARGS` in `noonoo/settings.py`).
+Options that can run programs, load code or read and write arbitrary files, like `--exec`, are refused.
 
 ### When a site stops working
 Sites change all the time. **Tools › Update Download Engine** pulls the latest yt-dlp.
@@ -101,6 +119,8 @@ Sites change all the time. **Tools › Update Download Engine** pulls the latest
 app/                NooNoo.app source: NooNoo.swift (window shell), Info.plist, icon.svg
 build_app.sh        builds + installs NooNoo.app (--arch=arm64|x86_64|universal, --no-install, --zip)
 release.sh          publishes a new version (see "Publishing a new version")
+make_update_key.sh  creates the key that signs updates (run once)
+tests/              security tests: python3 tests/test_security.py
 noonoo/
   __main__.py         starts the engine (--serve for the app, or opens your browser)
   spotify.py          Spotify links -> matching YouTube uploads
@@ -108,6 +128,7 @@ noonoo/
   server.py           localhost HTTP API (token + host checked), static UI, media streaming
   engine.py           download queue, yt-dlp process control, progress parsing, search/probe
   tools.py            fetches/updates yt-dlp, ffmpeg, ffprobe, deno
+  verify.py           proves updates and tools came from their publishers
   settings.py         options + defaults (~/Library/Application Support/NooNoo/settings.json)
   web/                the Windows XP-style UI (HTML, CSS, JS, SVG icons, no build step)
 ```

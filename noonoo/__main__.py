@@ -22,6 +22,7 @@ def main():
     ap.add_argument("--no-setup", action="store_true", help="don't auto-download missing tools on launch")
     opts = ap.parse_args()
 
+    tools.secure_data_dir()
     app = App()
     if tools.missing() and not opts.no_setup:  # first run: fetch yt-dlp/ffmpeg/deno in the background, UI shows progress
         app.install_tools()

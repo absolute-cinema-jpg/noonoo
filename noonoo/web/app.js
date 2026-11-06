@@ -630,7 +630,11 @@ function stars(it) {
   return `<span class="stars" title="${fmt.views(it.views)} views">${s}</span>`;
 }
 
-const thumbImg = (url) => url ? `<img class="th" src="${esc(url)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'">` : "";
+const thumbImg = (url) => url ? `<img class="th" src="${esc(url)}" loading="lazy" referrerpolicy="no-referrer">` : "";
+// Thumbnails that fail to load. A listener, since the Content-Security-Policy blocks inline handlers.
+document.addEventListener("error", (e) => {
+  if (e.target instanceof HTMLImageElement && e.target.classList.contains("th")) e.target.style.visibility = "hidden";
+}, true);
 const thumbCol = (get, extra = {}) => ({
   key: "thumb", label: "", title: "Thumbnail", thumb: true, cls: "c-thumb", render: (i) => thumbImg(get(i)),
   get w() { return S.settings?.thumbs === "large" ? 108 : 64; }, ...extra,
@@ -1537,7 +1541,7 @@ const OPTION_PAGES = [
   { id: "engine", label: "Download Engine", icon: "download32", fields: [{ type: "engine" }] },
   { id: "advanced", label: "Advanced", icon: "fileOther", fields: [
     { key: "extra_args", label: "Extra yt-dlp arguments", type: "text", placeholder: "--no-mtime --write-description",
-      help: "Appended to every download. See <a class='lnk' data-url='https://github.com/yt-dlp/yt-dlp#usage-and-options'>yt-dlp options</a>." },
+      help: "Appended to every download. See <a class='lnk' data-url='https://github.com/yt-dlp/yt-dlp#usage-and-options'>yt-dlp options</a>. Options that can run programs or change files aren't allowed." },
   ] },
 ];
 

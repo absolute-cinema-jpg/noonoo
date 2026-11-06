@@ -17,11 +17,12 @@ import time
 import urllib.request
 
 from . import settings as settings_mod
+from . import verify
 from .tools import DATA_DIR
 
 # Public repo whose GitHub releases NooNoo updates from (release.sh publishes there).
 FEED_REPO = "absolute-cinema-jpg/noonoo"
-FEED_URL = os.environ.get("NOONOO_UPDATE_FEED") or "https://api.github.com/repos/%s/releases/latest" % FEED_REPO
+FEED_URL = "https://api.github.com/repos/%s/releases/latest" % FEED_REPO
 BUNDLE_ID = "local.noonoo.NooNoo"
 STAGE_DIR = DATA_DIR / "update"
 STATE_FILE = DATA_DIR / "update.json"          # last check time + version the user chose to skip
@@ -94,6 +95,7 @@ class Updater:
         self.state = {"status": "idle", "current": current_version(), "latest": "", "notes": "", "page": "",
                       "size": None, "progress": 0, "error": "", "can_install": bool(app_path()), "skipped": ""}
         self._asset = None
+        self._signature = None
         self._saved = self._load()
         self.state["skipped"] = self._saved.get("skipped", "")
 
@@ -148,6 +150,7 @@ class Updater:
         asset = next((a for a in rel.get("assets", []) if a.get("name", "").endswith("-%s.zip" % flavour)), None)
         newer = parse_version(latest) > parse_version(self.state["current"])
         self._asset = asset
+        self._signature = next((a for a in rel.get("assets", []) if asset and a.get("name") == asset["name"] + ".sig"), None)
         self._set(latest=latest, notes=_notes(rel.get("body")), page=rel.get("html_url", ""),
                   size=(asset or {}).get("size"),
                   status="available" if newer and asset else "uptodate",
@@ -187,6 +190,15 @@ class Updater:
             want = (a.get("digest") or "").replace("sha256:", "")
             if want and want != digest.hexdigest():
                 raise RuntimeError("the download was damaged (checksum mismatch) - try again")
+            # The checks above catch damage. This one proves it came from NooNoo's release key:
+            # GitHub alone can't vouch for it, and the app's ad-hoc code signature proves nothing.
+            if not self._signature:
+                raise verify.VerificationError("this release isn't signed")
+            sigpath = STAGE_DIR / "update.sig"
+            with _open(self._signature["browser_download_url"], settings_mod.load()["proxy"]) as r, open(sigpath, "wb") as f:
+                f.write(r.read(4096))
+            verify.verify_update(zpath, sigpath)
+            sigpath.unlink()
             subprocess.run(["ditto", "-x", "-k", str(zpath), str(STAGE_DIR / "new")], check=True, capture_output=True)
             app = STAGE_DIR / "new" / "NooNoo.app"
             version, bundle = _version_of(str(app))
