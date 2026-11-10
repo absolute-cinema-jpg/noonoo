@@ -9,7 +9,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from . import engine as engine_mod
 from . import settings as settings_mod
@@ -17,14 +17,10 @@ from . import tools
 from . import updater as updater_mod
 
 WEB_DIR = Path(__file__).parent / "web"
-MEDIA_EXT = {
-    "audio": {".mp3", ".m4a", ".aac", ".opus", ".ogg", ".flac", ".wav", ".aiff", ".alac", ".wma"},
-    "video": {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".m4v", ".ts", ".3gp", ".mxf"},
-}
 TOKEN = secrets.token_urlsafe(24)
 # Remote images are search thumbnails. Scripts must be ours, so injected markup can't run code.
 CSP = ("default-src 'none'; script-src 'self' 'nonce-%s'; style-src 'self' 'unsafe-inline'; "
-       "img-src 'self' data: https: http:; media-src 'self'; connect-src 'self'; font-src 'self'; "
+       "img-src 'self' data: https: http:; connect-src 'self'; font-src 'self'; "
        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 
 
@@ -59,52 +55,29 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
 
-def _library_roots(s):
-    """Default folder plus favourites; nested duplicates dropped so nothing is listed twice."""
-    paths = [s["output_dir"], s["current_folder"]] + s["folders"].splitlines()
-    roots = []
-    for p in paths:
-        p = os.path.realpath(os.path.expanduser(p.strip())) if p.strip() else ""
-        if p and p not in roots:
-            roots.append(p)
-    return [r for r in roots if not any(r != o and r.startswith(o + os.sep) for o in roots)]
-
-
-def _inside(path, roots):
-    real = os.path.realpath(path)
-    return any(real == r or real.startswith(r + os.sep) for r in roots)
-
-
-def library(s):
-    roots = _library_roots(s)
-    files, denied = [], []
-    for root in roots:
-        try:
-            os.listdir(root)
-        except PermissionError:  # macOS privacy: Downloads/Documents/Desktop/external drives need permission
-            denied.append(root)
-            continue
-        except OSError:
-            continue
-        for dirpath, dirnames, names in os.walk(root):
-            if dirpath[len(root):].count(os.sep) >= 4 or len(files) > 20000:  # don't crawl a whole disk
-                dirnames[:] = []
-            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
-            for n in names:
-                ext = os.path.splitext(n)[1].lower()
-                kind = next((k for k, exts in MEDIA_EXT.items() if ext in exts), None)
-                if not kind or n.startswith("."):
-                    continue
-                p = os.path.join(dirpath, n)
-                try:
-                    st = os.stat(p)
-                except OSError:
-                    continue
-                files.append({"path": p, "name": n, "kind": kind, "ext": ext[1:], "size": st.st_size,
-                              "mtime": st.st_mtime, "dir": dirpath, "root": root,
-                              "folder": os.path.relpath(dirpath, root)})
-    files.sort(key=lambda f: -f["mtime"])
-    return {"root": roots[0] if roots else "", "roots": roots, "files": files, "denied": denied}
+def clean_folder(raw):
+    """A folder path as typed or pasted -> {"path", "exists"}, or {"error"} saying what's wrong with it."""
+    p = (raw or "").strip()
+    if len(p) > 1 and p[0] == p[-1] and p[0] in "\"'":     # 'quoted' or "quoted"
+        p = p[1:-1].strip()
+    if p.lower().startswith("file://"):                    # a dragged or copied file URL
+        p = unquote(urlparse(p).path)
+    if re.search(r"[\x00-\x1f]", p):
+        return {"error": "That doesn't look like a folder path."}
+    if not os.path.exists(os.path.expanduser(p)):
+        p = re.sub(r"\\(.)", r"\1", p)                      # copied from Terminal: My\ Folder
+    p = os.path.expanduser(p)
+    if not os.path.isabs(p):
+        return {"error": "Enter the full path to the folder, such as ~/Movies or /Volumes/Drive/Media."}
+    p = os.path.normpath(p)
+    if os.path.exists(p) and not os.path.isdir(p):
+        return {"error": "That's a file, not a folder: %s" % p}
+    parent = p
+    while not os.path.exists(parent):                      # new folders are created when a download lands
+        parent = os.path.dirname(parent)
+    if not os.access(parent, os.W_OK):
+        return {"error": "NooNoo can't save there, because it can't write to %s. If it's on a drive, is the drive connected?" % parent}
+    return {"path": p, "exists": os.path.isdir(p)}
 
 
 def make_handler(app):
@@ -180,54 +153,9 @@ def make_handler(app):
                 return self._send(200, {"status": tools.status(), "missing": tools.missing(),
                                         "busy": app.tools_busy, "log": app.tool_log[-20:],
                                         "bin": str(tools.BIN_DIR)})
-            if u.path == "/api/library":
-                return self._send(200, library(settings_mod.load()))
-            if u.path == "/media":
-                return self._media((q.get("path") or [""])[0])
             return self._send(404, {"error": "not found"})
 
         do_HEAD = do_GET
-
-        def _allowed(self, path, s):
-            return _inside(path, _library_roots(s)) or os.path.realpath(path) in {
-                os.path.realpath(p) for p in app.engine.known_files()}
-
-        def _media(self, path):
-            s = settings_mod.load()
-            if not path or not self._allowed(path, s) or not os.path.isfile(path):
-                return self._send(404, {"error": "not found"})
-            size = os.path.getsize(path)
-            start, end = 0, size - 1
-            m = re.match(r"bytes=(\d*)-(\d*)", self.headers.get("Range") or "")
-            if m:
-                if m.group(1):
-                    start = int(m.group(1))
-                    end = int(m.group(2)) if m.group(2) else end
-                elif m.group(2):
-                    start = max(0, size - int(m.group(2)))
-            end = min(end, size - 1)
-            length = max(0, end - start + 1)
-            self.send_response(206 if m else 200)
-            self.send_header("Content-Type", mimetypes.guess_type(path)[0] or "application/octet-stream")
-            self.send_header("Accept-Ranges", "bytes")
-            self.send_header("Content-Length", str(length))
-            if m:
-                self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
-            self.end_headers()
-            if self.command == "HEAD":
-                return
-            with open(path, "rb") as f:
-                f.seek(start)
-                left = length
-                try:
-                    while left > 0:
-                        chunk = f.read(min(1 << 16, left))
-                        if not chunk:
-                            break
-                        self.wfile.write(chunk)
-                        left -= len(chunk)
-                except (BrokenPipeError, ConnectionResetError):
-                    pass
 
         # ---- POST ----------------------------------------------------------
         def do_POST(self):
@@ -285,6 +213,8 @@ def make_handler(app):
                 return {"ok": True}
             if path == "/api/open":
                 return self._open(b, s)
+            if path == "/api/check-folder":
+                return clean_folder(b.get("path"))
             if path == "/api/choose-folder":
                 return {"path": choose_folder(b.get("start") or s["output_dir"])}
             if path == "/api/window":
@@ -298,23 +228,18 @@ def make_handler(app):
                     raise RuntimeError("not a web link")
                 subprocess.Popen(["open", target])
             elif what == "folder":
-                d = os.path.expanduser(target or s["current_folder"] or s["output_dir"])
-                job_dirs = {os.path.realpath(x.folder) for x in app.engine.jobs.values() if x.folder}
-                if target and (d.endswith((".app", ".app/")) or not (
-                        _inside(d, _library_roots(s)) or os.path.realpath(d) in job_dirs)):
+                d = os.path.expanduser(target or s["output_dir"])
+                known = {os.path.realpath(x.folder) for x in app.engine.jobs.values() if x.folder}
+                known.add(os.path.realpath(os.path.expanduser(s["output_dir"])))
+                if target and (d.endswith((".app", ".app/")) or os.path.realpath(d) not in known):
                     raise RuntimeError("Not one of your download folders")
                 os.makedirs(d, exist_ok=True)
                 subprocess.Popen(["open", d])
-            elif what in ("file", "reveal", "trash"):
-                if not self._allowed(target, s) or not os.path.exists(target):
+            elif what in ("file", "reveal"):
+                downloaded = {os.path.realpath(f) for f in app.engine.known_files()}
+                if os.path.realpath(target) not in downloaded or not os.path.exists(target):
                     raise RuntimeError("File not found (moved or deleted?)")
-                if what == "file":
-                    subprocess.Popen(["open", target])
-                elif what == "reveal":
-                    subprocess.Popen(["open", "-R", target])
-                else:  # move to Trash via Finder so it can be put back
-                    script = 'tell application "Finder" to delete (POSIX file %s as alias)' % json.dumps(target)
-                    subprocess.run(["osascript", "-e", script], capture_output=True, timeout=30, check=True)
+                subprocess.Popen(["open", target] if what == "file" else ["open", "-R", target])
             return {"ok": True}
 
     return Handler

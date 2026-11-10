@@ -67,8 +67,6 @@
         <path d="M3 8 L5.5 6 L7.5 7.5 L10 4.5 L13 7" stroke="#9cff6a" fill="none"/>
         <path d="M5 12.5 h6 l1 2.5 h-8z" fill="#ccc" stroke="#555"/>`);
     },
-    library24: () => folder(24),
-    library16: () => folder(16),
     folder16: () => folder(16),
     globe16: () => globe(16),
 
@@ -111,14 +109,6 @@
     },
     resume32: () => playTri(32, "#b7e86b", "#3f9a12", "#2b6a0b"),
     play32: () => playTri(32, "#9fd0ff", "#1f5fc0", "#183f7a"),
-    launch32: () => {
-      const a = uid();
-      return svg(32, 32, `<defs>${lin(a, [[0, "#ffffff"], [1, "#c8d8f0"]])}</defs>
-        <rect x="3" y="5" width="22" height="20" rx="2" fill="url(#${a})" stroke="#335" stroke-width="1.3"/>
-        <rect x="3" y="5" width="22" height="5" rx="2" fill="#2b63d8"/>
-        <path d="M17 14 h11 v11" fill="none" stroke="#2b6a0b" stroke-width="2.5"/>
-        <path d="M28 14 L16 26" stroke="#2b6a0b" stroke-width="2.5"/>`);
-    },
     explore32: () => {
       const a = uid(), b = uid();
       return svg(32, 32, `<defs>${lin(a, [[0, "#ffe9a0"], [1, "#e0a92a"]])}${rad(b, [[0, "#fff"], [1, "#8fc0ff"]])}</defs>
@@ -163,9 +153,6 @@
     user16: () => svg(16, 16, `
         <circle cx="8" cy="5" r="3.2" fill="#f2c79a" stroke="#8a5a2a"/>
         <path d="M2 15 q0 -6 6 -6 q6 0 6 6z" fill="#4a86e0" stroke="#1f3f80"/>`),
-    clock16: () => svg(16, 16, `
-        <circle cx="8" cy="8" r="6.5" fill="#fff" stroke="#2a5aa0" stroke-width="1.3"/>
-        <path d="M8 4 V8 L11 9.5" stroke="#222" stroke-width="1.2" fill="none"/>`),
     all16: () => svg(16, 16, `
         <rect x="1.5" y="1.5" width="6" height="6" fill="#e0a92a" stroke="#8a6510"/><rect x="8.5" y="1.5" width="6" height="6" fill="#4a86e0" stroke="#1f3f80"/>
         <rect x="1.5" y="8.5" width="6" height="6" fill="#4fb81e" stroke="#2b6a0b"/><rect x="8.5" y="8.5" width="6" height="6" fill="#e0301a" stroke="#7a0d04"/>`),

@@ -49,12 +49,6 @@ const fmt = {
   date(d) {  // yyyymmdd -> yyyy-mm-dd
     return d && d.length === 8 ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}` : "";
   },
-  time(ts) {
-    if (!ts) return "";
-    const d = new Date(ts * 1000);
-    return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) + " " +
-      d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-  },
 };
 
 const store = {
@@ -80,13 +74,11 @@ const S = {
   jobs: [],
   jobVersion: -1,
   jobSel: new Set(),
-  lib: { files: [], root: "", folder: "*", filter: "" },
-  libSel: new Set(),
-  libDirty: true,
   flash: null,
 };
 
 // ---------------------------------------------------------------- ListView (XP list control)
+const NAME_MIN_WIDTH = 120;
 const colPrefs = () => { try { return JSON.parse(S.settings?.columns || "{}") || {}; } catch { return {}; } };
 
 class ListView {
@@ -200,6 +192,8 @@ class ListView {
       const w = this.widths[c.key] ?? c.w;
       return `<col style="${w ? `width:${w}px` : ""}">`;
     }).join("");
+    // The Name column takes what's left over, which is nothing in a narrow window, so the list scrolls sideways instead.
+    const minWidth = cols.reduce((sum, c) => sum + (this.widths[c.key] ?? c.w ?? NAME_MIN_WIDTH), 0);
     let body = "";
     if (this.o.before) body += this.o.before() || "";
     for (const it of this.view) {
@@ -213,7 +207,7 @@ class ListView {
     const emptyEl = this.wrap.querySelector(".empty-state");
     if (emptyEl) emptyEl.classList.toggle("hidden", !!this.view.length || !!(this.o.before && this.o.before()));
     this.wrap.insertAdjacentHTML("beforeend",
-      `<table class="lv ${thumbCls}"><colgroup>${colgroup}</colgroup><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`);
+      `<table class="lv ${thumbCls}" style="min-width:${minWidth}px"><colgroup>${colgroup}</colgroup><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`);
     if (!this.view.length && !emptyEl && this.empty && !(this.o.before && this.o.before())) {
       this.wrap.querySelector("tbody").innerHTML = `<tr class="row-msg"><td colspan="${cols.length}">${this.empty}</td></tr>`;
     }
@@ -302,7 +296,12 @@ class ListView {
     e.preventDefault();
     const key = th.dataset.key, x0 = e.clientX, w0 = th.getBoundingClientRect().width;
     const col = this.wrap.querySelectorAll("col")[[...th.parentElement.children].indexOf(th)];
-    const mv = (ev) => { col.style.width = Math.max(24, w0 + ev.clientX - x0) + "px"; };
+    const table = th.closest("table"), min0 = parseFloat(table.style.minWidth) || 0;
+    const mv = (ev) => {
+      const w = Math.max(24, w0 + ev.clientX - x0);
+      col.style.width = w + "px";
+      table.style.minWidth = min0 + w - w0 + "px";
+    };
     const up = (ev) => {
       document.removeEventListener("mousemove", mv);
       document.removeEventListener("mouseup", up);
@@ -401,9 +400,8 @@ const MENUS = {
   nav: () => [
     { label: "Search", key: "⌘1", run: () => showPage("search") },
     { label: "Monitor", key: "⌘2", run: () => showPage("monitor") },
-    { label: "Library", key: "⌘3", run: () => showPage("library") },
     "-",
-    { label: "Close Search Tab", key: "⌘W", run: () => S.active && closeSearch(S.active.id), disabled: !S.active },
+    { label: "Close Search Tab", key: "⇧⌘W", run: () => S.active && closeSearch(S.active.id), disabled: !S.active },
   ],
   tools: () => [
     { label: "Options...", key: "⌘,", run: () => openOptions() },
@@ -539,10 +537,10 @@ function shortcutsHelp() {
 Enter          Download selected (audio with ⇧Enter)
 ⌫ / Delete     Junk results · remove downloads
 ⌘A             Select all
-⌘1 ⌘2 ⌘3      Search / Monitor / Library
-⌘W             Close search tab
-⌘,             Options
-Space          Play / pause in Library`, { icon: "info32" });
+⌘1 ⌘2          Search / Monitor
+⌘W             Close window (quits NooNoo)
+⇧⌘W            Close search tab
+⌘,             Options`, { icon: "info32" });
 }
 
 // ---------------------------------------------------------------- NooNoo.app bridge
@@ -566,7 +564,7 @@ function blink(host) {
 window.noonooBlink = (sel) => blink($(sel));
 // app menu bar items (NooNoo › About, Preferences...) call in here
 window.noonooMenu = (cmd) => ({ about, options: () => openOptions(), paste: pasteAndSearch, updates: () => checkUpdates(true),
-  search: () => showPage("search"), monitor: () => showPage("monitor"), library: () => showPage("library") }[cmd] || (() => {}))();
+  search: () => showPage("search"), monitor: () => showPage("monitor") }[cmd] || (() => {}))();
 function winAction(action) { return native(action); }
 $$("[data-win]").forEach((b) => b.addEventListener("click", () => winAction(b.dataset.win)));
 async function pickFolder(start) {
@@ -579,7 +577,6 @@ function showPage(p) {
   S.page = p;
   $$(".maintab").forEach((t) => t.classList.toggle("active", t.dataset.page === p));
   $$(".page").forEach((pg) => pg.classList.toggle("active", pg.id === "page-" + p));
-  if (p === "library" && S.libDirty) loadLibrary();
   if (p === "monitor") { renderJobs(); $("#jobs-wrap").focus(); }
   if (p === "search") renderSearch();
 }
@@ -609,18 +606,6 @@ function vformatOptions(cur) {
     `<optgroup label="${esc(label)}">${Object.keys(S.videoFormats).filter(test).map(o).join("")}</optgroup>`).join("");
 }
 const shortPath = (p) => (p || "").replace(S.home, "~");
-const baseName = (p) => (p || "").replace(/\/+$/, "").split("/").pop() || p;
-function favFolders() {
-  return S.settings.folders.split("\n").map((x) => x.trim()).filter(Boolean);
-}
-async function chooseFolder(start) {
-  const r = { path: await pickFolder(start || S.settings.current_folder || S.settings.output_dir) };
-  if (!r.path) return null;
-  const favs = [r.path, ...favFolders().filter((f) => f !== r.path)].slice(0, 15);
-  if (r.path !== S.settings.output_dir) await saveSettings({ folders: favs.join("\n") });
-  return r.path;
-}
-
 // Popularity: 0-4 stars from the view count (1K, 10K, 100K, 1M+); blank when the site doesn't say
 function stars(it) {
   if (it.views == null) return "";
@@ -681,8 +666,8 @@ const results = new ListView($("#results-wrap"), "results", resultCols, {
   onContext: (e, sel) => Menu.show(e.clientX, e.clientY, [
     { label: "Download Video", run: () => download(sel, "video") },
     { label: "Download Audio Only", run: () => download(sel, "audio") },
-    { label: "Download to Folder...", run: async () => { const f = await chooseFolder(); f && download(sel, "video", "", f); } },
-    { label: "Download Audio to Folder...", run: async () => { const f = await chooseFolder(); f && download(sel, "audio", "", f); } },
+    { label: "Download to Folder...", run: async () => { const f = await pickFolder(S.settings.output_dir); f && download(sel, "video", "", f); } },
+    { label: "Download Audio to Folder...", run: async () => { const f = await pickFolder(S.settings.output_dir); f && download(sel, "audio", "", f); } },
     "-",
     ...VIDEO_Q.slice(1).map(([v, l]) => ({ label: "Download at " + l, run: () => download(sel, "video", v) })),
     "-",
@@ -877,7 +862,37 @@ function updateSearchButtons() {
   $("#act-browse").disabled = !has || sel.length > 5;
   $("#act-junk").disabled = !has;
   $("#act-stop").disabled = !(S.active && S.active.status === "searching");
+  updateNameBox(sel);
 }
+
+// File name box: names whatever is selected. One result starts from its title, ready to edit; several
+// are left to their own titles unless a name is typed, which then gets numbered. A new selection starts afresh.
+const nameBox = { key: null, title: "" };
+function updateNameBox(sel) {
+  const key = sel.map((i) => i._id).sort().join();
+  if (key === nameBox.key) return;
+  nameBox.key = key;
+  nameBox.title = sel.length === 1 ? sel[0].title || "" : "";
+  const box = $("#quick-name");
+  box.disabled = !sel.length;
+  box.value = nameBox.title;
+  box.placeholder = !sel.length ? "Select a result to name it" : sel.length > 1 ? `Their own titles, or a name to number 1-${sel.length}` : "";
+}
+// The name for each of these items, or "" for the usual name. Only for the selection the box is showing.
+function chosenNames(items) {
+  const typed = $("#quick-name").value.trim();
+  const sel = results.view ? results.selected() : [];
+  const same = items.length === sel.length && items.every((i) => sel.includes(i));
+  if (!same || !typed || typed === nameBox.title) return items.map(() => "");
+  if (items.length === 1) return [typed];
+  const width = Math.max(2, String(items.length).length);
+  return items.map((_, n) => `${typed} ${String(n + 1).padStart(width, "0")}`);
+}
+$("#quick-name").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); e.target.blur(); }
+  if (e.key === "Escape") { e.target.value = nameBox.title; e.target.blur(); }
+});
+$("#quick-name").addEventListener("blur", (e) => { if (!e.target.value.trim()) e.target.value = nameBox.title; });
 
 function junk(sel) {
   const s = S.active;
@@ -890,16 +905,23 @@ async function download(items, kind, quality, folder) {
   items = items.filter(Boolean);
   if (!items.length) return;
   const q = kind === "video" ? (quality || S.settings.video_quality) : "";
-  const dest = folder || S.settings.current_folder || S.settings.output_dir;
   try {
+    if (!folder && !(await commitSaveFolder())) {
+      msgbox("Save to", esc($("#quick-folder").title), { icon: "warn32" });
+      return;
+    }
+    const dest = folder || S.settings.output_dir;
+    const names = chosenNames(items);
     const r = await api("/api/download", {
-      items: items.map(({ url, title, site, uploader, thumbnail, duration, playlist, tags }) => ({ url, title, site, uploader, thumbnail, duration, playlist, tags })),
+      items: items.map(({ url, title, site, uploader, thumbnail, duration, playlist, tags }, n) => ({ url, title, site, uploader, thumbnail, duration, playlist, tags, filename: names[n] })),
       kind, quality: q === "best" ? "" : q, folder: dest,
       vformat: S.settings.video_format, aformat: S.settings.audio_format,
       fps: S.settings.edit_fps,
     });
     items.forEach((i) => (i._queued = true));
     if (S.page === "search") results.render();
+    nameBox.key = null;     // a name is for one download: don't reuse it if Download is pressed again
+    updateSearchButtons();
     const wav = /^wav/.test(S.settings.audio_format);
     const fpsNote = S.settings.edit_fps !== "source" && (kind === "video" || wav) ? ` at ${S.settings.edit_fps} fps` : "";
     const as = (kind === "video" ? S.videoFormats[S.settings.video_format] : (AUDIO_F.find((a) => a[0] === S.settings.audio_format) || [, "audio"])[1]) + fpsNote;
@@ -929,27 +951,61 @@ function fillQuick() {
   $("#quick-fps").title = "Video is conformed to this rate (frames repeated or dropped, not retimed). WAV audio is stamped with it for Avid — MP3/M4A can't carry a frame rate.";
   $("#quick-video").value = S.settings.video_quality;
   $("#quick-audio").value = S.settings.audio_format;
-  const def = S.settings.output_dir, cur = S.settings.current_folder || def;
-  const opts = [def, ...favFolders().filter((f) => f !== def)];
-  $("#quick-folder").innerHTML = opts.map((f) =>
-      `<option value="${esc(f)}" title="${esc(f)}" ${f === cur ? "selected" : ""}>${esc(baseName(f))}${f === def ? " (default)" : ""}</option>`).join("") +
-    `<option disabled>──────────</option><option value="__choose">Choose folder...</option><option value="__manage">Edit favourites...</option>`;
-  $("#quick-folder").title = "New downloads go to " + cur;
+  const box = $("#quick-folder");
+  if (document.activeElement !== box && !box.classList.contains("bad")) {   // never overwrite what's being typed
+    box.value = S.settings.output_dir;
+    box.title = "New downloads go to " + S.settings.output_dir;
+    showPathEnd(box);
+  }
+}
+// a long path is told apart by its last folders, so show those when it isn't being edited
+function showPathEnd(box) {
+  setTimeout(() => { if (document.activeElement !== box) box.scrollLeft = box.scrollWidth; });
 }
 $("#quick-video").addEventListener("change", (e) => saveSettings({ video_quality: e.target.value }));
 $("#quick-audio").addEventListener("change", (e) => saveSettings({ audio_format: e.target.value }));
 $("#quick-vformat").addEventListener("change", (e) => saveSettings({ video_format: e.target.value }));
 $("#quick-fps").addEventListener("change", (e) => saveSettings({ edit_fps: e.target.value }));
-$("#quick-folder").addEventListener("change", async (e) => {
-  const v = e.target.value;
-  if (v === "__manage") { fillQuick(); return openOptions("saving"); }
-  if (v === "__choose") {
-    const f = await chooseFolder();
-    if (f) await saveSettings({ current_folder: f });
-    fillQuick();
-    return;
+
+// Save to: whatever's in the box is checked, then becomes where downloads go. False if it isn't usable,
+// with the reason in the box's tooltip.
+async function commitSaveFolder() {
+  const box = $("#quick-folder"), typed = box.value.trim();
+  if (!typed || typed === S.settings.output_dir) {
+    box.classList.remove("bad");
+    box.value = S.settings.output_dir;
+    return true;
   }
-  saveSettings({ current_folder: v === S.settings.output_dir ? "" : v });
+  const r = await api("/api/check-folder", { path: typed });
+  box.classList.toggle("bad", !!r.error);
+  if (r.error) {
+    box.title = r.error;
+    flash(r.error, 8000);
+    return false;
+  }
+  box.value = r.path;
+  box.title = "New downloads go to " + r.path;
+  await saveSettings({ output_dir: r.path });
+  flash(`Saving to ${shortPath(r.path)}${r.exists ? "" : " (NooNoo will create this folder)"}`, 6000);
+  return true;
+}
+$("#quick-folder").addEventListener("change", () => commitSaveFolder().catch((e) => flash(e.message)));
+$("#quick-folder").addEventListener("blur", (e) => showPathEnd(e.target));
+window.addEventListener("resize", () => showPathEnd($("#quick-folder")));
+$("#quick-folder").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); e.target.blur(); }
+  if (e.key === "Escape") {
+    e.target.value = S.settings.output_dir;
+    e.target.classList.remove("bad");
+    e.target.blur();
+  }
+});
+$("#browse-folder").addEventListener("click", async () => {
+  const box = $("#quick-folder");
+  const path = await pickFolder(box.classList.contains("bad") ? S.settings.output_dir : box.value.trim() || S.settings.output_dir);
+  if (!path) return;
+  box.value = path;
+  await commitSaveFolder().catch((e) => flash(e.message));
 });
 
 async function pasteAndSearch() {
@@ -1130,171 +1186,6 @@ $("#job-details").addEventListener("click", (e) => {
   });
 })();
 
-// ================================================================= LIBRARY
-const libCols = [
-  { key: "kind", label: "", w: 24, cls: "c-icon", render: (f) => icon(f.kind === "audio" ? "fileAudio" : "fileVideo"), title: "File Icon" },
-  { key: "name", label: "Name", w: null, fixed: true },
-  { key: "ext", label: "Type", w: 54 },
-  { key: "size", label: "Size", w: 76, cls: "num", render: (f) => fmt.size(f.size) },
-  { key: "mtime", label: "Downloaded", w: 150, render: (f) => fmt.time(f.mtime) },
-  { key: "folder", label: "Folder", w: 140, render: (f) => `<span title="${esc(f.dir)}">${esc(baseName(f.root) + (f.folder === "." ? "" : "/" + f.folder))}</span>`, sortVal: (f) => f.dir },
-];
-const libView = new ListView($("#lib-wrap"), "library", libCols, {
-  id: (f) => f.path,
-  sel: S.libSel,
-  sort: { key: "mtime", desc: true },
-  empty: "Nothing here yet — finished downloads show up in this list.",
-  onSel: () => updateLibButtons(),
-  onDbl: (f) => f && Player.play(f),
-  onEnter: (sel) => sel[0] && Player.play(sel[0]),
-  onDelete: (sel) => trashFiles(sel),
-  onContext: (e, sel) => Menu.show(e.clientX, e.clientY, [
-    { label: "Play", run: () => Player.play(sel[0]), disabled: sel.length !== 1 },
-    { label: "Launch in Default App", run: () => sel.forEach((f) => openFile(f.path)) },
-    { label: "Explore", run: () => api("/api/open", { what: "reveal", path: sel[0].path }) },
-    { label: "Copy Path", run: () => copyText(sel.map((f) => f.path).join("\n")) },
-    "-",
-    { label: "Move to Trash", key: "⌫", run: () => trashFiles(sel) },
-  ]),
-});
-function libVisible() {
-  const q = S.lib.filter.toLowerCase();
-  const fo = S.lib.folder;
-  const dir = fo.startsWith("dir:") ? fo.slice(4) : null;
-  return S.lib.files.filter((f) =>
-    (fo === "*" || (dir ? f.dir === dir || f.dir.startsWith(dir + "/") :
-      fo === "audio" ? f.kind === "audio" : fo === "video" ? f.kind === "video" : fo === "week" ? f.mtime > Date.now() / 1000 - 7 * 86400 : false)) &&
-    (!q || f.name.toLowerCase().includes(q)));
-}
-async function loadLibrary() {
-  try {
-    const d = await api("/api/library");
-    S.lib.files = d.files;
-    S.lib.roots = d.roots;
-    S.libDirty = false;
-    if (d.denied.length) flash(`macOS is blocking NooNoo from reading ${d.denied.map(shortPath).join(", ")} — allow it in System Settings › Privacy & Security › Files and Folders.`, 12000);
-  } catch (e) { flash(e.message); }
-  renderLibrary();
-}
-function renderLibrary() {
-  const files = S.lib.files, roots = S.lib.roots || [];
-  const nA = files.filter((f) => f.kind === "audio").length;
-  const nW = files.filter((f) => f.mtime > Date.now() / 1000 - 7 * 86400).length;
-  const under = (d) => files.filter((f) => f.dir === d || f.dir.startsWith(d + "/")).length;
-  const item = (v, label, n, ic, cls = "", title = "") => `<li data-v="${esc(v)}" class="${cls} ${S.lib.folder === v ? "sel" : ""}" title="${esc(title)}">${icon(ic)}<span class="lbl">${esc(label)}</span><span class="cnt">${n}</span></li>`;
-  // every download folder, with its first level of subfolders (Audio, Video, per-site...) underneath
-  const tree = roots.map((r) => {
-    const subs = [...new Set(files.filter((f) => f.root === r && f.folder !== ".").map((f) => f.folder.split("/")[0]))].sort();
-    return item("dir:" + r, baseName(r), under(r), "folder16", "", r) +
-      subs.map((sub) => item("dir:" + r + "/" + sub, sub, under(r + "/" + sub), "folder16", "sub", r + "/" + sub)).join("");
-  }).join("");
-  $("#lib-tree").innerHTML = item("*", "All Downloads", files.length, "library16") + item("audio", "Audio", nA, "fileAudio") +
-    item("video", "Video", files.length - nA, "fileVideo") + item("week", "This Week", nW, "clock16") + tree;
-  $("#lib-root").textContent = roots.length > 1 ? `${roots.length} folders` : shortPath(roots[0] || "");
-  const vis = libVisible();
-  $("#lib-title").textContent = $(`#lib-tree li.sel .lbl`)?.textContent || "All Downloads";
-  $("#lib-summary").textContent = `— ${vis.length} file${vis.length === 1 ? "" : "s"}, ${fmt.size(vis.reduce((a, f) => a + f.size, 0)) || "0 B"}`;
-  libView.setItems(vis);
-  updateLibButtons();
-}
-$("#lib-tree").addEventListener("click", (e) => {
-  const li = e.target.closest("li[data-v]");
-  if (li) { S.lib.folder = li.dataset.v; renderLibrary(); }
-});
-$("#lib-filter").addEventListener("input", (e) => { S.lib.filter = e.target.value; renderLibrary(); });
-function updateLibButtons() {
-  const sel = libView.view ? libView.selected() : [];
-  $("#lib-play").disabled = sel.length !== 1;
-  $("#lib-launch").disabled = !sel.length;
-  $("#lib-reveal").disabled = sel.length !== 1;
-  $("#lib-delete").disabled = !sel.length;
-}
-async function trashFiles(sel) {
-  if (!sel.length) return;
-  const ok = await confirmBox("Move to Trash", sel.length === 1 ? `Move “${esc(sel[0].name)}” to the Trash?` : `Move ${sel.length} files to the Trash?`, "Move to Trash");
-  if (!ok) return;
-  for (const f of sel) {
-    try { await api("/api/open", { what: "trash", path: f.path }); } catch (e) { flash(e.message); }
-  }
-  loadLibrary();
-}
-$("#lib-play").addEventListener("click", () => Player.play(libView.selected()[0]));
-$("#lib-launch").addEventListener("click", () => libView.selected().forEach((f) => openFile(f.path)));
-$("#lib-reveal").addEventListener("click", () => api("/api/open", { what: "reveal", path: libView.selected()[0].path }));
-$("#lib-delete").addEventListener("click", () => trashFiles(libView.selected()));
-$("#lib-refresh").addEventListener("click", loadLibrary);
-$("#lib-open-folder").addEventListener("click", () => {
-  const fo = S.lib.folder;
-  api("/api/open", { what: "folder", path: fo.startsWith("dir:") ? fo.slice(4) : "" }).catch((e) => flash(e.message));
-});
-
-// ================================================================= MEDIA PLAYER
-const Player = {
-  audio: $("#audio"), cur: null, win: null,
-  src(f) { return `/media?t=${encodeURIComponent(window.TOKEN)}&path=${encodeURIComponent(f.path)}`; },
-  list() { return S.lib.files.length ? libVisible() : []; },
-  play(f) {
-    if (!f) {
-      if (this.cur && this.cur.kind === "audio" && this.audio.src) return this.audio.play();
-      const sel = libView.view ? libView.selected()[0] : null;
-      f = sel || this.list()[0];
-      if (!f) return flash("Nothing to play — download something first.");
-    }
-    this.stop(true);
-    this.cur = f;
-    if (f.kind === "audio") {
-      this.audio.src = this.src(f);
-      this.audio.play().catch((e) => flash("Can't play this file here: " + e.message));
-    } else {
-      const d = dialog({ title: f.name, cls: "player-win", modal: false, onClose: () => { this.win = null; if (this.cur === f) this.stop(); },
-        body: `<video src="${this.src(f)}" controls autoplay></video>` });
-      d.el.style.position = "fixed"; d.el.style.inset = "auto 30px 50px auto"; d.el.style.zIndex = 1400;
-      this.win = d;
-      const v = $("video", d.el);
-      v.addEventListener("ended", () => this.next());
-      v.addEventListener("timeupdate", () => this.progress(v));
-    }
-    this.track(f.name, true);
-  },
-  stop(silent) {
-    this.audio.pause();
-    this.audio.removeAttribute("src");
-    if (this.win) { const w = this.win; this.win = null; w.close(); }
-    if (!silent) { this.cur = null; this.track("NooNoo Media Player", false); }
-  },
-  pause() {
-    if (this.win) { const v = $("video", this.win.el); v.paused ? v.play() : v.pause(); return; }
-    this.audio.paused ? this.audio.play() : this.audio.pause();
-  },
-  step(d) {
-    const l = this.list();
-    if (!l.length) return;
-    const i = this.cur ? l.findIndex((f) => f.path === this.cur.path) : -1;
-    this.play(l[(i + d + l.length) % l.length]);
-  },
-  next() { this.step(1); },
-  progress(m) {
-    const bar = $("#pl-track .pl-pos");
-    if (bar && m.duration) bar.style.width = (100 * m.currentTime / m.duration) + "%";
-  },
-  track(name, playing) {
-    const t = $("#pl-track");
-    t.innerHTML = `<span>${esc(name)}</span><i class="pl-pos"></i>`;
-    t.classList.toggle("playing", playing);
-    t.title = name;
-  },
-};
-Player.audio.addEventListener("ended", () => Player.next());
-Player.audio.addEventListener("timeupdate", () => Player.progress(Player.audio));
-$$(".pl-btn").forEach((b) => b.addEventListener("click", () => {
-  const a = b.dataset.pl;
-  if (a === "play") Player.play();
-  else if (a === "pause") Player.pause();
-  else if (a === "stop") Player.stop();
-  else if (a === "next") Player.step(1);
-  else if (a === "prev") Player.step(-1);
-}));
-
 // ================================================================= STATUS / POLLING
 let pollTimer = null, polling = false;
 async function poll() {
@@ -1303,13 +1194,8 @@ async function poll() {
   try {
     const st = await api("/api/state");
     if (st.version !== S.jobVersion) {
-      const before = new Map(S.jobs.map((j) => [j.id, j.status]));
       S.jobVersion = st.version;
       S.jobs = st.jobs;
-      if (st.jobs.some((j) => j.status === "done" && before.get(j.id) && before.get(j.id) !== "done")) {
-        S.libDirty = true;
-        if (S.page === "library") loadLibrary();
-      }
       renderJobs();
     }
     S.stats = st;
@@ -1441,13 +1327,8 @@ async function loadSettings() {
   applySettings();
 }
 async function saveSettings(patch) {
-  const before = S.settings;
   const d = await api("/api/settings", { settings: { ...S.settings, ...patch } });
   S.settings = d.settings;
-  if (["folders", "output_dir", "current_folder"].some((k) => before[k] !== d.settings[k])) {
-    S.libDirty = true;
-    if (S.page === "library") loadLibrary();
-  }
   applySettings();
 }
 function applySettings() {
@@ -1457,9 +1338,6 @@ function applySettings() {
 
 const OPTION_PAGES = [
   { id: "saving", label: "Saving", icon: "folder16", fields: [
-    { key: "output_dir", label: "Default folder", type: "folder" },
-    { key: "folders", label: "Favourite folders", type: "folders",
-      help: "These appear in <b>Save to</b> on the Search tab, so each download can go somewhere different. Right-click a result › <b>Download to Folder...</b> for a one-off location. The Library shows all of them." },
     { key: "organize", label: "Sort into subfolders by", type: "select", options: [["none", "Nothing"], ["site", "Site (YouTube, TikTok...)"], ["uploader", "Uploader / channel"], ["playlist", "Playlist"], ["date", "Download date (2026-10-26)"]] },
     { key: "filename_template", label: "File name pattern", type: "text", list: [
         ["%(title).180B [%(id)s].%(ext)s", "Title [id]"], ["%(title).200B.%(ext)s", "Title"],
@@ -1561,7 +1439,6 @@ function openOptions(startPage) {
     if (f.type === "check") return `<label class="cb"><input type="checkbox" id="${id}" data-k="${f.key}" ${v ? "checked" : ""}>${esc(f.label)}</label>${help}`;
     if (f.type === "select") return `<div class="row"><label for="${id}">${esc(f.label)}</label><select id="${id}" data-k="${f.key}">${f.options.map(([o, l]) => `<option value="${esc(o)}" ${String(v) === o ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></div>${help}`;
     if (f.type === "number") return `<div class="row"><label for="${id}">${esc(f.label)}</label><input type="number" id="${id}" data-k="${f.key}" value="${esc(v)}" min="${f.min}" max="${f.max}" style="width:70px"></div>${help}`;
-    if (f.type === "folder") return `<div class="row"><label>${esc(f.label)}</label><input id="${id}" data-k="${f.key}" value="${esc(v)}"><button class="xp-btn" data-browse="${f.key}">Browse...</button></div>${help}`;
     if (f.type === "text") return `<div class="row"><label for="${id}">${esc(f.label)}</label><input id="${id}" data-k="${f.key}" value="${esc(v)}" placeholder="${esc(f.placeholder || "")}" spellcheck="false">
         ${f.list ? `<select data-preset="${f.key}" style="width:22px;padding:0 0 0 18px" title="Presets"><option></option>${f.list.map(([o, l]) => `<option value="${esc(o)}">${esc(l)}</option>`).join("")}</select>` : ""}</div>${help}`;
     if (f.type === "theme") {
@@ -1574,16 +1451,12 @@ function openOptions(startPage) {
     if (f.type === "columns") {
       const prefs = (() => { try { return JSON.parse(draft.columns || "{}") || {}; } catch { return {}; } })();
       return `<div class="help">Tick the columns each list shows. You can also right-click any column header, drag headers to reorder them, and drag their edges to resize.</div>` +
-        [[results, "Search results"], [jobsView, "Downloads (Monitor)"], [libView, "Library"]].map(([lv, title]) => {
+        [[results, "Search results"], [jobsView, "Downloads (Monitor)"]].map(([lv, title]) => {
           const hidden = new Set((prefs[lv.name] || {}).hidden || lv.allCols.filter((c) => c.hidden).map((c) => c.key));
           return `<fieldset><legend>${title}</legend><div class="site-grid">${lv.allCols.filter((c) => !c.fixed && !c.toggle).map((c) =>
             `<label class="cb"><input type="checkbox" data-col="${lv.name}:${c.key}" ${hidden.has(c.key) ? "" : "checked"}>${esc(c.title || c.label)}</label>`).join("")}</div></fieldset>`;
         }).join("") + `<button class="xp-btn" data-cols-reset>Reset All Columns</button>`;
     }
-    if (f.type === "folders") return `<div><label>${esc(f.label)}</label><div class="folder-list" id="fav-list">${
-        String(v).split("\n").filter((x) => x.trim()).map((x) => `<div data-fav="${esc(x)}" title="${esc(x)}">${icon("folder16")}${esc(shortPath(x))}</div>`).join("") ||
-        `<div class="muted">No favourites yet</div>`}</div>
-        <div class="row"><button class="xp-btn" data-fav-add>Add...</button><button class="xp-btn" data-fav-remove>Remove</button></div></div>${help}`;
     if (f.type === "sites") {
       const on = new Set(String(v).split(",").filter(Boolean));
       return `<div><label>${esc(f.label)}</label><div class="site-grid">${Object.entries(S.cookieSites).map(([k, l]) =>
@@ -1624,33 +1497,10 @@ function openOptions(startPage) {
     const nav = e.target.closest(".opts-nav [data-p]");
     if (nav) return show(nav.dataset.p);
     if (e.target.closest("[data-keychain]")) { e.preventDefault(); return keychainHelp(KEYCHAIN_NAMES[draft.cookies_browser] ? draft.cookies_browser : "chrome"); }
-    const br = e.target.closest("[data-browse]");
-    if (br) {
-      const r = { path: await pickFolder(draft[br.dataset.browse]) };
-      if (r.path) { draft[br.dataset.browse] = r.path; $("#opt-" + br.dataset.browse, pane).value = r.path; }
-      return;
-    }
-    const fav = e.target.closest("[data-fav]");
-    if (fav) { $$("#fav-list [data-fav]", pane).forEach((d) => d.classList.toggle("sel", d === fav)); return; }
     if (e.target.closest("[data-cols-reset]")) {
       draft.columns = "";
-      [results, jobsView, libView].forEach((lv) => { lv.widths = {}; store.set(`widths.${lv.name}`, {}); });
+      [results, jobsView].forEach((lv) => { lv.widths = {}; store.set(`widths.${lv.name}`, {}); });
       return show(page);
-    }
-    if (e.target.closest("[data-fav-add]")) {
-      const r = { path: await pickFolder(draft.output_dir) };
-      const list = draft.folders.split("\n").filter((x) => x.trim());
-      if (r.path && !list.includes(r.path)) { draft.folders = [...list, r.path].join("\n"); show(page); }
-      return;
-    }
-    if (e.target.closest("[data-fav-remove]")) {
-      const sel = $("#fav-list .sel", pane);
-      if (sel) {
-        draft.folders = draft.folders.split("\n").filter((x) => x.trim() && x !== sel.dataset.fav).join("\n");
-        if (draft.current_folder === sel.dataset.fav) draft.current_folder = "";
-        show(page);
-      }
-      return;
     }
     if (e.target.id === "tools-update") { await api("/api/tools/install", { update: true }); refreshEngine(); }
     const u = e.target.closest("[data-url]");
@@ -1666,7 +1516,7 @@ function openOptions(startPage) {
     if (t.dataset.col) {
       const [table, key] = t.dataset.col.split(":");
       const prefs = (() => { try { return JSON.parse(draft.columns || "{}") || {}; } catch { return {}; } })();
-      const lv = [results, jobsView, libView].find((x) => x.name === table);
+      const lv = [results, jobsView].find((x) => x.name === table);
       const hidden = new Set((prefs[table] || {}).hidden || lv.allCols.filter((c) => c.hidden).map((c) => c.key));
       t.checked ? hidden.delete(key) : hidden.add(key);
       prefs[table] = { ...(prefs[table] || {}), hidden: [...hidden] };
@@ -1698,7 +1548,8 @@ function openOptions(startPage) {
     buttons: [
       { label: "Restore Defaults", left: true, keepOpen: true, run: async () => {
           if (await confirmBox("Options", "Reset every option to its default?")) {
-            Object.assign(draft, S.defaults); show(page); document.body.dataset.theme = draft.theme;
+            Object.assign(draft, S.defaults, { output_dir: S.settings.output_dir });
+            show(page); document.body.dataset.theme = draft.theme;
           }
         } },
       { label: "OK", default: true, run: () => { apply(); } },
@@ -1747,18 +1598,14 @@ async function checkTools() {
 
 // ================================================================= keyboard, paste, drag & drop
 document.addEventListener("keydown", (e) => {
-  const inField = e.target.matches("input, textarea, select");
   if (e.key === "Escape") { Menu.close(); Tip.hide(); const top = $$("#dialogs > *").pop(); if (top && top._close) top._close(null); return; }
-  if (!e.metaKey && !e.ctrlKey) {
-    if (e.key === " " && S.page === "library" && !inField) { e.preventDefault(); Player.cur ? Player.pause() : Player.play(); }
-    return;
-  }
+  if (!e.metaKey && !e.ctrlKey) return;
   const k = e.key.toLowerCase();
-  if (k === "1" || k === "2" || k === "3") { e.preventDefault(); showPage(["search", "monitor", "library"][+k - 1]); }
+  if (k === "1" || k === "2") { e.preventDefault(); showPage(["search", "monitor"][+k - 1]); }
   else if (k === ",") { e.preventDefault(); openOptions(); }
   else if (k === "f") { e.preventDefault(); showPage("search"); $("#q").focus(); $("#q").select(); }
   else if (k === "n") { e.preventDefault(); newSearch(); }
-  else if (k === "w") { e.preventDefault(); if (S.page === "search" && S.active) closeSearch(S.active.id); }
+  else if (k === "w" && e.shiftKey) { e.preventDefault(); if (S.page === "search" && S.active) closeSearch(S.active.id); }
   else if (k === "o") { e.preventDefault(); api("/api/open", { what: "folder" }); }
 });
 document.addEventListener("paste", (e) => {

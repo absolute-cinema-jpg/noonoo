@@ -34,7 +34,6 @@
   <div id="tabbar">
     <button class="maintab active" data-page="search"><span data-icon="search24"></span>Search</button>
     <button class="maintab" data-page="monitor"><span data-icon="monitor24"></span>Monitor<b class="badge" id="monitor-badge"></b></button>
-    <button class="maintab" data-page="library"><span data-icon="library24"></span>Library</button>
     <div class="logo" data-icon="logo"></div>
   </div>
 
@@ -80,7 +79,14 @@
             <label>Frame rate <select id="quick-fps"></select></label>
             <label>Video as <select id="quick-vformat" title="File type for video downloads"></select></label>
             <label>Audio as <select id="quick-audio" title="File type for audio downloads"></select></label>
-            <label class="span2">Save to <select id="quick-folder" title="Where new downloads go"></select></label>
+            <label for="quick-folder">Save to</label>
+            <div class="save-to">
+              <input id="quick-folder" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="Paste or type a folder path">
+              <button class="xp-btn" id="browse-folder" title="Choose a folder">Browse...</button>
+            </div>
+            <label for="quick-name">File name</label>
+            <input id="quick-name" spellcheck="false" autocomplete="off" autocapitalize="off" disabled
+              title="What to call the selected download. NooNoo adds the file extension.">
           </div>
         </div>
       </div>
@@ -102,34 +108,6 @@
         <button class="bigbtn" id="job-clear"><span data-icon="clear32"></span>Clear Inactive</button>
       </div>
     </section>
-
-    <!-- ================= LIBRARY ================= -->
-    <section class="page" id="page-library">
-      <aside class="sidebar lib-side">
-        <div class="filter-box">
-          <div class="fb-head">Library</div>
-          <ul class="fb-list" id="lib-tree"></ul>
-        </div>
-        <div class="search-box slim">
-          <input id="lib-filter" placeholder="Filter by name..." spellcheck="false">
-        </div>
-        <div class="sidebar-foot">
-          <button class="xp-btn" id="lib-open-folder">Open Folder</button>
-          <div class="muted small" id="lib-root"></div>
-        </div>
-      </aside>
-      <div class="main-pane">
-        <div class="pane-title"><span data-icon="library16"></span> <span id="lib-title">All Downloads</span> <span class="muted" id="lib-summary"></span></div>
-        <div class="table-wrap" id="lib-wrap"></div>
-        <div class="action-bar">
-          <button class="bigbtn" id="lib-play" disabled><span data-icon="play32"></span>Play</button>
-          <button class="bigbtn" id="lib-launch" disabled><span data-icon="launch32"></span>Launch</button>
-          <button class="bigbtn" id="lib-reveal" disabled><span data-icon="explore32"></span>Explore</button>
-          <button class="bigbtn" id="lib-delete" disabled><span data-icon="junk32"></span>Delete</button>
-          <button class="bigbtn" id="lib-refresh"><span data-icon="retry32"></span>Refresh</button>
-        </div>
-      </div>
-    </section>
   </div>
 
   <!-- ===== status bar ===== -->
@@ -138,19 +116,10 @@
     <span class="sb-cell" data-icon="globe16"></span>
     <span class="sb-cell sb-count" id="sb-count" title="Active downloads">0</span>
     <span class="sb-cell sb-text" id="sb-text">Ready</span>
-    <span class="sb-cell sb-player">
-      <button class="pl-btn" data-pl="prev" title="Previous"></button>
-      <button class="pl-btn" data-pl="play" title="Play"></button>
-      <button class="pl-btn" data-pl="pause" title="Pause"></button>
-      <button class="pl-btn" data-pl="stop" title="Stop"></button>
-      <button class="pl-btn" data-pl="next" title="Next"></button>
-      <span class="pl-track" id="pl-track"><span>NooNoo Media Player</span></span>
-    </span>
     <span class="sizegrip" id="sizegrip"></span>
   </div>
 </div>
 
-<audio id="audio" preload="none"></audio>
 <div id="menus"></div>
 <div id="tooltip" class="xp-tooltip"></div>
 <div id="dialogs"></div>

@@ -14,9 +14,11 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-os.environ["HOME"] = tempfile.mkdtemp(prefix="noonoo-test-")  # before NooNoo works out its data folder
+import _isolate  # noqa: E402,F401  (before noonoo)
 
 from noonoo import server, settings, tools, updater, verify  # noqa: E402
+
+assert str(settings.SETTINGS_FILE).startswith(os.environ["HOME"]), "tests must not use the real settings"
 
 FIXTURES = Path(__file__).parent / "fixtures"
 OPENSSL = "/usr/bin/openssl"

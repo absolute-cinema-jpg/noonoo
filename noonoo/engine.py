@@ -344,7 +344,7 @@ def _safe_name(s):
 
 def target_dir(s, kind, item, base=None):
     """Where a new download goes: chosen folder plus the optional auto-subfolder."""
-    d = os.path.expanduser(base or s["current_folder"] or s["output_dir"])
+    d = os.path.expanduser(base or s["output_dir"])
     part = {
         "site": item.get("site"),
         "uploader": item.get("uploader"),
@@ -362,7 +362,7 @@ class Job:
     FIELDS = ("id", "url", "title", "site", "uploader", "thumbnail", "duration", "kind", "quality",
               "status", "progress", "downloaded", "total", "speed", "eta", "stage", "filepath",
               "error", "added", "finished", "part", "parts", "vformat", "aformat", "folder",
-              "raw_file", "used_login", "playlist", "tags", "fps")
+              "raw_file", "used_login", "playlist", "tags", "fps", "filename")
 
     def __init__(self, **kw):
         self.id = uuid.uuid4().hex[:10]
@@ -395,6 +395,7 @@ class Job:
         self.playlist = ""
         self.tags = None          # {"title", "artist", "album"} from Spotify, written over YouTube's
         self.fps = "source"       # frame rate to conform converted video to
+        self.filename = ""        # name the user chose, without an extension; "" = the usual pattern
         for k, v in kw.items():
             if k in self.FIELDS:
                 setattr(self, k, v)
@@ -500,7 +501,8 @@ class Engine:
             for it in items:
                 if not it.get("url"):
                     continue
-                j = Job(url=it["url"], title=it.get("title") or it["url"], site=it.get("site", ""),
+                name = custom_filename(s, it.get("filename"))
+                j = Job(url=it["url"], title=name or it.get("title") or it["url"], filename=name, site=it.get("site", ""),
                         uploader=it.get("uploader", ""), thumbnail=it.get("thumbnail", ""),
                         duration=it.get("duration"), kind=kind, quality=quality, vformat=vformat,
                         aformat=aformat, playlist=it.get("playlist", ""), tags=it.get("tags"), fps=fps,
@@ -648,6 +650,8 @@ class Engine:
         if result == "ok" and j.kind == "audio" and j.fps_rate() and j.filepath.lower().endswith(".wav") \
                 and j.filepath.startswith(str(TEMP_DIR)):
             result, err = self._stamp_bwf(j, j.filepath)
+        if result == "ok" and j.filename and j.filepath and j.filepath.startswith(str(TEMP_DIR)):
+            result, err = self._apply_filename(j)
         if result == "ok" and j.filepath and j.filepath.startswith(str(TEMP_DIR)):
             if j.converts():
                 j.raw_file = j.filepath
@@ -722,7 +726,8 @@ class Engine:
                          and not j.fps_rate() and all(a.get("codec_name") in ("aac", "mp3") for a in audio)):
             return self._deliver(j, src)  # audio-only source, or already plays everywhere
 
-        dst = os.path.join(os.path.dirname(src), "converting." + spec["ext"])
+        # a leading dot, because a chosen file name never has one, so src can't be called this too
+        dst = os.path.join(os.path.dirname(src), ".converting." + spec["ext"])
         duration = float(probe.get("format", {}).get("duration") or j.duration or 0)
         fps = main.get("avg_frame_rate") or main.get("r_frame_rate") or "30/1"
         if fps in ("0/0", "0/1"):
@@ -860,6 +865,16 @@ class Engine:
         os.replace(tmp, src)
         return "ok", ""
 
+    def _apply_filename(self, j):
+        """Swap the name yt-dlp gave the file for the one the user chose. Conversions then keep it."""
+        named = os.path.join(os.path.dirname(j.filepath), j.filename + os.path.splitext(j.filepath)[1])
+        try:
+            os.replace(j.filepath, named)
+        except OSError as e:
+            return "error", "Couldn't name the file %s: %s" % (j.filename, e)
+        j.filepath = named
+        return "ok", ""
+
     def _deliver(self, j, src):
         """Move a finished file out of the job's workspace into its destination folder."""
         try:
@@ -960,7 +975,7 @@ class Engine:
             elif line.startswith(INFO):
                 info = json.loads(line[len(INFO):])
                 with self.lock:
-                    j.title = info.get("title") or j.title
+                    j.title = j.filename or info.get("title") or j.title
                     j.site = info.get("extractor_key") or j.site
                     j.thumbnail = j.thumbnail or info.get("thumbnail") or ""
                     j.duration = j.duration or info.get("duration")
@@ -1044,21 +1059,30 @@ def notify(title, text):
         pass
 
 
+_MEDIA_SUFFIX = re.compile(r"\.(mp4|m4v|mov|mkv|webm|avi|mxf|mp3|m4a|aac|opus|ogg|flac|wav|aiff?)$", re.I)
 _FILENAME_SWAPS = str.maketrans({"/": "⧸", "\\": "⧹", ":": "：", "*": "＊", "?": "？", '"': "＂",
                                   "<": "＜", ">": "＞", "|": "｜"})
 
 
-def song_filename(s, tags, fallback):
-    """Just the Spotify song title - never the YouTube upload's title, artist or id."""
-    name = (tags.get("title") or "").strip()
-    if not name:
-        return os.path.splitext(fallback)[0]
+def clean_filename(s, name):
+    """A file name that's safe to save, without path separators or anything else the filesystem refuses."""
+    name = str(name or "").strip()
     if s["restrict_filenames"]:
         name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
         name = re.sub(r"[^\w.-]+", "_", name).strip("_.")
     else:
         name = re.sub(r"[\x00-\x1f]", "", name.translate(_FILENAME_SWAPS)).strip().lstrip(".")
-    return name.encode()[:200].decode("utf-8", "ignore") or os.path.splitext(fallback)[0]
+    return name.encode()[:200].decode("utf-8", "ignore").rstrip(" .")
+
+
+def custom_filename(s, name):
+    """A name typed for one download. The file's real type sets the extension, so a typed one is dropped."""
+    return clean_filename(s, _MEDIA_SUFFIX.sub("", str(name or "").strip()))
+
+
+def song_filename(s, tags, fallback):
+    """Just the Spotify song title - never the YouTube upload's title, artist or id."""
+    return clean_filename(s, tags.get("title")) or os.path.splitext(fallback)[0]
 
 
 def _fetch_cover(url, folder, proxy=""):
@@ -1152,7 +1176,7 @@ def build_args(j, s, with_login=False):
         a += ["-r", s["rate_limit"]]
     if s["restrict_filenames"]:
         a.append("--restrict-filenames")
-    if s["skip_existing"] and not j.force:
+    if s["skip_existing"] and not j.force and not j.filename:   # naming a copy means wanting that copy
         a += ["--download-archive", _archive(j)]
 
     thumb_ok = True

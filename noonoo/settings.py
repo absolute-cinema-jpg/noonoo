@@ -10,9 +10,7 @@ SETTINGS_FILE = DATA_DIR / "settings.json"
 
 DEFAULTS = {
     # Saving
-    "output_dir": str(Path.home() / "Downloads" / "NooNoo"),
-    "folders": "",                    # favourite destinations, one path per line
-    "current_folder": "",             # where new downloads go ("" = output_dir)
+    "output_dir": str(Path.home() / "Downloads" / "NooNoo"),   # where new downloads go (Save to box)
     "organize": "none",               # none | site | uploader | playlist | date  - automatic subfolder
     "filename_template": "%(title).200B.%(ext)s",
     "filename_id": False,             # add the site's video id: "Title [dQw4w9WgXcQ].mp4"
@@ -144,6 +142,8 @@ def load():
     old_formats = {"original": "h264", "mkv": "h264", "prores_hq": "dnxhr_hq", "prores": "dnxhr_sq",
                    "prores_lt": "dnxhr_sq", "prores_proxy": "dnxhr_lb", "dnxhr_hq_mxf": "dnxhr_hq"}
     data["video_format"] = old_formats.get(data["video_format"], data["video_format"])
+    if raw.get("current_folder"):         # settings from when Save to was a list of favourites
+        data["output_dir"] = raw["current_folder"]
     if raw.get("filename_template") == "%(title).180B [%(id)s].%(ext)s":  # old default had the id baked in
         data["filename_template"] = DEFAULTS["filename_template"]
     if raw.get("cookies_browser") and "cookies_sites" not in raw:

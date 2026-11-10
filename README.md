@@ -29,13 +29,11 @@ errors are written to `~/Library/Logs/NooNoo.log`.
 - **Search tab**: paste one or more links (or press ⌘V anywhere) or type keywords. Playlists and
   channels expand into one row per video. Filter by media type, source or uploader on the left.
   Double-click or **Download** saves video; **Download Audio** saves audio only.
-  The panel at the bottom right sets **Quality**, **Video as**, **Audio as** and **Save to** for new downloads.
+  The panel at the bottom right sets **Quality**, **Video as**, **Audio as**, **Save to** and **File name** for new downloads.
 - **Monitor tab**: live progress, speed and ETA, including conversion progress. Each download shows
   its format, its folder, and whether your browser login was used.
 - **Columns**: right-click any list header to show or hide columns (including thumbnails), drag
   headers to reorder them, and drag their edges to resize. Options › Columns does the same.
-- **Library tab**: every download folder, with its subfolders. Play files in the built-in player,
-  open them, reveal them in Finder, or move them to the Trash.
 
 ### Best quality
 NooNoo always downloads the highest resolution available, up to your Quality setting. If a source
@@ -54,11 +52,17 @@ Pick a **Frame rate** next to Quality to conform clips to your project. For audi
 (Avid)** is available. Turn on Options › Saving › *Plain ASCII file names* for the safest Avid media names.
 
 ### Folders
-- **Save to** (bottom right of Search) switches the destination for new downloads. *Choose folder...*
-  adds a folder to your favourites.
+- **Save to** (bottom right of Search) is where new downloads go. Click **Browse...**, or type or paste
+  a path into the box (`~/Movies`, Finder's *Copy as Pathname*, or a path copied from Terminal all work).
+  A folder that doesn't exist yet is created when a download lands.
 - Right-click a result › **Download to Folder...** for a one-off location.
 - Options › Saving › *Sort into subfolders by* can file downloads by site, uploader, playlist or
   download date automatically.
+
+### File names
+Select a result and its title appears in **File name** (bottom right of Search), ready to edit or replace.
+NooNoo adds the extension. Select several and type one name to number them: `Interview 01`, `Interview 02`.
+Leave the box alone and Options › Saving › *File name pattern* decides. A name is used once, for that download.
 
 ### Spotify
 Paste a Spotify song, album, playlist or artist link and each song shows up as its own row.

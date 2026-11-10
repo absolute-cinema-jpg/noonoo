@@ -367,10 +367,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         let view = NSMenu(title: "View")
         view.addItem(item("Search", #selector(menuSearch)))
         view.addItem(item("Monitor", #selector(menuMonitor)))
-        view.addItem(item("Library", #selector(menuLibrary)))
         add(view, to: main)
 
         let win = NSMenu(title: "Window")
+        win.addItem(item("Close", #selector(menuClose), "w"))
         win.addItem(item("Minimize", #selector(menuMinimize), "m"))
         win.addItem(item("Zoom", #selector(menuZoom)))
         add(win, to: main)
@@ -394,7 +394,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     @objc func menuOptions() { callMenu("options") }
     @objc func menuSearch() { callMenu("search") }
     @objc func menuMonitor() { callMenu("monitor") }
-    @objc func menuLibrary() { callMenu("library") }
+    @objc func menuClose() { window?.close() }   // last window closed, so NooNoo quits (downloads pause)
     @objc func menuMinimize() { window?.miniaturize(nil) }
     @objc func menuZoom() { window?.zoom(nil) }
 }
