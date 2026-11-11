@@ -115,7 +115,13 @@ Options › Advanced accepts a fixed list of harmless options (`EXTRA_ARGS` in `
 Options that can run programs, load code or read and write arbitrary files, like `--exec`, are refused.
 
 ### When a site stops working
-Sites change all the time. **Tools › Update Download Engine** pulls the latest yt-dlp.
+Sites change all the time, and yt-dlp releases fixes often. NooNoo installs each new yt-dlp release
+by itself (Options › Behaviour can turn this off), so you shouldn't need **Tools › Update Download Engine**.
+
+YouTube sometimes turns a connection away for a while ("Sign in to confirm you're not a bot", or
+HTTP 403). That isn't the engine being out of date: NooNoo tries again by itself, and if it still fails,
+pressing Retry a few minutes later usually works. Lending NooNoo your browser login for YouTube
+(Options › Accounts) makes it rarer.
 
 ## Layout
 

@@ -38,8 +38,19 @@ FINISHED = ("done", "error", "cancelled", "skipped")
 AUDIO_SITES = {"soundcloud", "bandcamp", "mixcloud", "audiomack", "spotify", "applepodcasts",
                "podbeanpodcast", "hearthisat", "jamendo", "audius", "deezer"}
 URL_RE = re.compile(r"^(https?://|www\.)|^[\w-]+(\.[\w-]+)+/\S*$", re.I)
+# YouTube turns some requests from a connection away for a while ("not a bot" checks, 403s on the video
+# data, rate limits). The same request often works seconds later, so NooNoo asks again before giving up.
+TRANSIENT_RE = re.compile(r"not a bot|HTTP Error 403|HTTP Error 429|Too Many Requests|rate.limit|"
+                          r"unable to download video data|timed out|Connection reset", re.I)
+RETRY_WAITS = (4, 12)        # seconds before each extra try at a download
+SEARCH_RETRY_WAITS = (2, 5)  # ...and at a link lookup, which someone is watching
 LOGIN_RE = re.compile(r"log ?in|logged|sign in|authenticat|cookies|private video|members.only|"
                       r"confirm your age|age.restrict|not a bot|rate.limit", re.I)
+# The site turned a logged-out request away. YouTube can list a video logged out and then refuse its
+# picture with a 403 that never mentions signing in, so these count as "refused" too. Facebook shows
+# logged-out visitors a page with no video data in it, which yt-dlp reports as "Cannot parse data".
+# Time-outs don't count.
+REFUSED_RE = re.compile(LOGIN_RE.pattern + r"|HTTP Error 403|HTTP Error 429|Too Many Requests|Cannot parse data", re.I)
 
 _PCM = ["-c:a", "pcm_s24le", "-ar", "48000"]          # what Avid and most NLEs expect
 _DNXHR = lambda p: ["-c:v", "dnxhd", "-profile:v", p, "-pix_fmt", "yuv422p"]
@@ -135,6 +146,7 @@ def _net_args(s):
 class Searcher:
     def __init__(self):
         self._procs = {}
+        self._stopped = set()
         self._lock = threading.Lock()
 
     def _once(self, sid, args, s, with_login):
@@ -160,9 +172,18 @@ class Searcher:
         allowed = login_allowed(s, url)
         first = allowed and s["cookies_mode"] == "always"
         data, err = self._once(sid, args, s, first)
-        if data is None and allowed and not first and LOGIN_RE.search(err):
-            data, err = self._once(sid, args, s, True)
+        if data is None and allowed and not first and REFUSED_RE.search(err):
             first = True
+            data, err = self._once(sid, args, s, True)
+        for wait in SEARCH_RETRY_WAITS:
+            if data is not None or not TRANSIENT_RE.search(err):
+                break
+            deadline = time.time() + wait
+            while time.time() < deadline:
+                if sid in self._stopped:
+                    raise RuntimeError("Search stopped")
+                time.sleep(0.2)
+            data, err = self._once(sid, args, s, first)
         if data is None:
             raise RuntimeError(_friendly_error(err, s, url))
         if first:
@@ -198,6 +219,7 @@ class Searcher:
         finally:
             with self._lock:
                 self._procs.pop(sid, None)
+                self._stopped.discard(sid)
 
     def _spotify(self, sid, url, s, used, errors):
         """Spotify can't be downloaded directly (DRM), so each song becomes its YouTube upload."""
@@ -245,7 +267,7 @@ class Searcher:
         s = settings_mod.load()
         allowed = urls and login_allowed(s, urls[0])
         out, err = self._details_once(sid, urls, kind, s, allowed and s["cookies_mode"] == "always")
-        if not out and allowed and s["cookies_mode"] != "always" and LOGIN_RE.search(err):
+        if not out and allowed and s["cookies_mode"] != "always" and REFUSED_RE.search(err):
             out, err = self._details_once(sid, urls, kind, s, True)
         return out
 
@@ -279,6 +301,7 @@ class Searcher:
 
     def cancel(self, sid=None):
         with self._lock:
+            self._stopped.update(self._procs if sid is None else [sid])
             procs = [p for k, ps in self._procs.items() if sid in (None, k) for p in ps]
         for p in procs:
             _kill(p, signal.SIGTERM)
@@ -637,12 +660,16 @@ class Engine:
             allowed = login_allowed(s, j.url)
             with_login = allowed and s["cookies_mode"] == "always"
             result, err = self._download(j, s, with_login)
-            if result == "error" and allowed and not with_login and LOGIN_RE.search(err):
-                j.log.append("== %s needs a login: retrying once with your %s login" % (_host(j.url), login_label(s)))
+            # A refusal logged out goes straight to the login: asking again logged out rarely helps.
+            if result == "error" and allowed and not with_login and REFUSED_RE.search(err):
+                j.log.append("== %s refused NooNoo logged out (%s): trying with your %s login"
+                             % (_host(j.url), err.strip()[:120], login_label(s)))
                 with self.lock:
                     j.status, j.stage, j.progress, j.part, j._cur, j._base = "starting", "Signing in...", 0, 0, None, 0
+                    self._changed()
                 with_login = True
                 result, err = self._download(j, s, True)
+            result, err = self._retry_refused(j, s, with_login, result, err)
             if with_login and result == "ok":
                 j.used_login = login_label(s)
         if result == "ok" and j.filepath and j.filepath.startswith(str(TEMP_DIR)) and j.tags:
@@ -683,6 +710,25 @@ class Engine:
         if j.status == "done" and s["notify_done"]:
             notify("Download complete", j.title)
         self._pump()
+
+    def _retry_refused(self, j, s, with_login, result, err):
+        """Try again, a little later, when the site turned this download away rather than failing it."""
+        for n, wait in enumerate(RETRY_WAITS, 1):
+            if result != "error" or not TRANSIENT_RE.search(err):
+                break
+            j.log.append("== %s refused this time (%s). Trying again in %ds (%d of %d)"
+                         % (_host(j.url), err.strip()[:120], wait, n, len(RETRY_WAITS)))
+            with self.lock:
+                j.status, j.stage, j.progress, j.part, j._cur, j._base = "starting", "Site busy, trying again...", 0, 0, None, 0
+                j.proc = None
+                self._changed()
+            deadline = time.time() + wait
+            while time.time() < deadline and not j._intent:
+                time.sleep(0.25)
+            if j._intent:
+                return ("paused" if j._intent == "pause" else "cancelled"), ""
+            result, err = self._download(j, s, with_login)
+        return result, err
 
     def _download(self, j, s, with_login):
         """One yt-dlp run. Returns (ok|paused|cancelled|error, last error line)."""
@@ -1026,8 +1072,11 @@ _PP_LABELS = {
 _ERROR_HINTS = [
     (r"Unsupported URL", "This site isn't supported by yt-dlp (or the link isn't a media page)."),
     (r"Requested format is not available", "That quality isn't available - try 'Best' in Options."),
-    (r"HTTP Error 403", "Server refused (403). Try Tools > Update Download Engine."),
+    (r"HTTP Error 403|HTTP Error 429|Too Many Requests", "The site kept turning NooNoo away. This usually passes in a few minutes, so press Retry then."),
     (r"No video could be found", "This post has no video in it."),
+    (r"Cannot parse data", "yt-dlp couldn't find the video on this page. If the site needs you signed in, "
+                           "Tools > Options > Accounts can lend NooNoo your browser login. Otherwise the site has changed, "
+                           "and NooNoo installs yt-dlp's fix by itself once it's released."),
     (r"Unsupported video frame rate|frame rate", "MXF needs a standard frame rate - pick one under Options > Video, or use .mov."),
 ]
 
@@ -1036,9 +1085,12 @@ def _friendly_error(line, s=None, url=""):
     msg = re.sub(r"^ERROR:\s*", "", line).strip()
     msg = re.sub(r"\s*Use --cookies.*$", "", msg)  # replaced by our own hint below
     msg = re.sub(r"\s*See\s+https://github.com/yt-dlp/yt-dlp/wiki/FAQ\S*.*$", "", msg)
+    msg = re.sub(r";?\s*please report this issue on\s.*$", "", msg)   # meant for yt-dlp users, not NooNoo's
     if s is not None and LOGIN_RE.search(msg):
         hint = _login_hint(s, url)
-        return "%s  %s" % (msg, hint) if hint else msg
+        if re.search(r"not a bot", msg, re.I):   # YouTube checking this connection, not this video
+            hint = "YouTube is limiting this connection for now. It usually clears in a few minutes, so press Retry then. " + hint
+        return "%s  %s" % (msg, hint.strip()) if hint.strip() else msg
     for pat, hint in _ERROR_HINTS:
         if re.search(pat, msg, re.I):
             return "%s  %s" % (msg, hint)

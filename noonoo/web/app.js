@@ -1384,6 +1384,8 @@ const OPTION_PAGES = [
     { key: "notify_done", label: "Show a notification when a download finishes", type: "check" },
     { key: "auto_update_check", label: "Check for new versions of NooNoo automatically", type: "check",
       help: "One anonymous request to GitHub on launch and every few hours. Help › Check for Updates works either way." },
+    { key: "auto_update_engine", label: "Keep the download engine (yt-dlp) up to date automatically", type: "check",
+      help: "Checks GitHub on launch and twice a day, and installs a new release only after checking its signature." },
     { key: "search_results", label: "Keyword search results", type: "number", min: 5, max: 200 },
     { key: "fetch_details", label: "Look up upload date, resolution and size for each search result (one extra request per result)", type: "check" },
     { key: "playlist_items_limit", label: "Max items to list from playlists / channels", type: "number", min: 10, max: 5000 },
@@ -1565,7 +1567,7 @@ async function checkTools() {
   let t;
   try { t = await api("/api/tools"); } catch { return; }
   S.toolsOk = !t.missing.length;
-  if (S.toolsOk && !t.busy) return renderStatus();
+  if (S.toolsOk) return renderStatus();   // a background update is no reason to show the setup window
   const d = dialog({
     title: "Setting up NooNoo", width: 460,
     body: `<div style="display:flex;gap:12px"><div data-icon="logoBig"></div><div style="flex:1">

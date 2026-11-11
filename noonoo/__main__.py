@@ -23,6 +23,7 @@ def main():
     opts = ap.parse_args()
 
     tools.secure_data_dir()
+    tools.prune_old_builds()   # before anything can be running an old copy
     app = App()
     if tools.missing() and not opts.no_setup:  # first run: fetch yt-dlp/ffmpeg/deno in the background, UI shows progress
         app.install_tools()
@@ -34,6 +35,7 @@ def main():
     if opts.serve:
         engine_mod.NOTIFY_VIA_APP = True
         app.updater.start_background_checks()
+        app.keep_engine_current()
         s = settings_mod.load()
         frame = "xp" if s["xp_frame"] else "native"
         # the app reads this line; when the app quits (or crashes) our stdin closes and we shut down cleanly

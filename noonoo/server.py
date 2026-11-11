@@ -54,6 +54,25 @@ class App:
 
         threading.Thread(target=work, daemon=True).start()
 
+    def keep_engine_current(self, every=12 * 3600):
+        """yt-dlp keeps up with sites by releasing often; install each new release without being asked."""
+        def loop():
+            time.sleep(20)   # after the window is up and any first downloads have started
+            while True:
+                if settings_mod.load()["auto_update_engine"] and not tools.missing() and not self.tools_busy:
+                    self.tools_busy = True
+                    try:
+                        new = tools.update_ytdlp(self.tool_log.append)
+                        if new:
+                            self.tool_log.append("Updated yt-dlp to %s automatically." % new)
+                    except Exception as e:   # offline, GitHub down, a check failed: keep the current copy
+                        self.tool_log.append("Automatic yt-dlp update skipped: %s" % e)
+                    finally:
+                        del self.tool_log[:-50]
+                        self.tools_busy = False
+                time.sleep(every)
+        threading.Thread(target=loop, daemon=True).start()
+
 
 def clean_folder(raw):
     """A folder path as typed or pasted -> {"path", "exists"}, or {"error"} saying what's wrong with it."""

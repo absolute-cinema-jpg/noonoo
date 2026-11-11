@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -112,9 +113,9 @@ def _ytdlp_release():
     return YTDLP_RELEASE % tag
 
 
-def _fetch_ytdlp(dl, tmp):
+def _fetch_ytdlp(dl, tmp, base=None):
     """Download yt-dlp and prove it against the checksums yt-dlp signed."""
-    base = _ytdlp_release()
+    base = base or _ytdlp_release()
     sums, sig = Path(tmp) / "sums", Path(tmp) / "sums.sig"
     _curl(base + YTDLP_SUMS, sums)
     _curl(base + YTDLP_SUMS + ".sig", sig)
@@ -123,7 +124,7 @@ def _fetch_ytdlp(dl, tmp):
     verify.verify_ytdlp(dl, YTDLP_ARCHIVE, sums.read_bytes(), sig.read_bytes())
 
 
-def _install(name, log):
+def _install(name, log, base=None):
     url, member = SOURCES[name]
     if name == "ffprobe":
         url = _resolve(SOURCES["ffmpeg"][0]).rsplit("/", 1)[0] + "/ffprobe.zip"
@@ -132,17 +133,17 @@ def _install(name, log):
     with tempfile.TemporaryDirectory(prefix="noonoo-") as tmp:
         dl = Path(tmp) / "download"
         if name == "yt-dlp":
-            _fetch_ytdlp(dl, tmp)
+            _fetch_ytdlp(dl, tmp, base)
         else:
             _curl(url, dl)
         if member and member.endswith("/"):  # whole-directory build behind a small wrapper script
-            dist = BIN_DIR / (name + "-dist")
+            # A new folder each time, so downloads already running keep their copy; old ones go at next launch.
+            dist = BIN_DIR / ("%s-dist-%d" % (name, time.time() * 1000))
             staged = Path(tmp) / "dist"
             subprocess.run(["unzip", "-q", str(dl), "-d", str(staged)], check=True)  # keeps exec bits
-            shutil.rmtree(dist, ignore_errors=True)
             shutil.move(str(staged), str(dist))
             wrapper = Path(tmp) / name
-            wrapper.write_text('#!/bin/sh\nexec "$(dirname "$0")/%s-dist/%s" "$@"\n' % (name, member.rstrip("/")))
+            wrapper.write_text('#!/bin/sh\nexec "$(dirname "$0")/%s/%s" "$@"\n' % (dist.name, member.rstrip("/")))
             dl = wrapper
         elif member:
             with zipfile.ZipFile(dl) as z:
@@ -152,8 +153,8 @@ def _install(name, log):
             dl = Path(tmp) / member
             verify.verify_team(dl, name)
         dl.chmod(0o755)
-        path(name).unlink(missing_ok=True)
-        shutil.move(str(dl), str(path(name)))
+        shutil.move(str(dl), str(path(name).with_name(name + ".new")))
+        os.replace(path(name).with_name(name + ".new"), path(name))   # never a moment with no tool
     # first launch of a new binary is slow while macOS scans it; do it now rather than on the first search
     log("Installed %s %s" % (name, version(name) or ""))
 
@@ -168,6 +169,27 @@ def ensure(log=print, names=None):
             log("Failed to install %s: %s" % (n, e))
             failed.append(n)
     return failed
+
+
+def prune_old_builds():
+    """Remove yt-dlp folders the wrapper no longer points at. Only safe before anything runs yt-dlp."""
+    try:
+        current = re.search(r'/([^/"]+)/[^/"]+" "\$@"', path("yt-dlp").read_text()).group(1)
+    except (OSError, AttributeError):
+        return
+    for d in BIN_DIR.glob("yt-dlp-dist*"):
+        if d.is_dir() and d.name != current:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def update_ytdlp(log=print):
+    """Install the newest yt-dlp release if this isn't it. Returns the version installed, or None."""
+    base = _ytdlp_release()
+    latest = base.rstrip("/").rsplit("/", 1)[-1]
+    if version("yt-dlp") == latest:
+        return None
+    _install("yt-dlp", log, base)
+    return latest
 
 
 def update(log=print):
