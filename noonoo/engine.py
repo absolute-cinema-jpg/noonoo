@@ -168,10 +168,16 @@ class Searcher:
         msg = [l for l in err.splitlines() if "ERROR" in l] or err.strip().splitlines()[-1:] or ["yt-dlp failed"]
         return None, msg[-1]
 
-    def _run(self, sid, args, s, url, used):
+    def _run(self, sid, args, s, url, used, empty_is_refusal=False):
+        """empty_is_refusal: for searches. YouTube answers some searches logged out with "Confirm your
+        age" and no results (Small Faces - Itchycoo Park), which yt-dlp reports as an empty list."""
         allowed = login_allowed(s, url)
         first = allowed and s["cookies_mode"] == "always"
         data, err = self._once(sid, args, s, first)
+        if data is not None and empty_is_refusal and not data.get("entries"):
+            if not (allowed and not first):
+                return data
+            data, err = None, "No results logged out (YouTube may want you to confirm your age)"
         if data is None and allowed and not first and REFUSED_RE.search(err):
             first = True
             data, err = self._once(sid, args, s, True)
@@ -214,7 +220,8 @@ class Searcher:
                 return {"items": items, "errors": errors, "login": sorted(used), "login_browser": login_label(s)}
             prefix = {"youtube": "ytsearch", "soundcloud": "scsearch", "youtube-new": "ytsearchdate"}.get(source, "ytsearch")
             site = "https://soundcloud.com" if prefix == "scsearch" else "https://www.youtube.com"
-            data = self._run(sid, ["--", "%s%d:%s" % (prefix, s["search_results"], query)], s, site, used)
+            data = self._run(sid, ["--", "%s%d:%s" % (prefix, s["search_results"], query)], s, site, used,
+                             empty_is_refusal=prefix != "scsearch")
             return {"items": _flatten(data), "errors": [], "login": sorted(used), "login_browser": login_label(s)}
         finally:
             with self._lock:
@@ -229,8 +236,14 @@ class Searcher:
             raise RuntimeError("No songs found")
 
         def match(t):
-            data = self._run(sid, ["--", "ytsearch5:" + spotify.query(t)], s, "https://www.youtube.com", used)
-            e = spotify.best_match(t, data.get("entries") or [])
+            e = None
+            # Logged out first, in two wordings (YouTube age-checks some searches but not others), then the login.
+            for q, login_ok in ((spotify.query(t), False), (spotify.query(t, title_first=True), False),
+                                (spotify.query(t), True)):
+                data = self._run(sid, ["--", "ytsearch5:" + q], s, "https://www.youtube.com", used, empty_is_refusal=login_ok)
+                e = spotify.best_match(t, data.get("entries") or [])
+                if e:
+                    break
             if not e:
                 return None
             it = _item(e, None)
@@ -253,11 +266,12 @@ class Searcher:
                 except RuntimeError as e:
                     if str(e) == "Search stopped":
                         raise
-                    it = None
+                    errors.append("%s: couldn't search YouTube (%s)" % (spotify.query(t), e))
+                    continue
                 if it:
                     out.append(it)
                 else:
-                    errors.append("No YouTube match for %s" % spotify.query(t))
+                    errors.append("%s: not found on YouTube" % spotify.query(t))
         return out
 
     def details(self, sid, urls, kind="video"):
@@ -709,6 +723,8 @@ class Engine:
             self._changed()
         if j.status == "done" and s["notify_done"]:
             notify("Download complete", j.title)
+        elif j.status == "error" and s["notify_done"]:
+            notify("Download failed", "%s: %s" % (j.title or j.url, j.error))
         self._pump()
 
     def _retry_refused(self, j, s, with_login, result, err):

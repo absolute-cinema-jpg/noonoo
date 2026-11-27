@@ -87,9 +87,11 @@ def lookup(url, proxy=""):
             "tracks": [t for t in tracks if t["title"]]}
 
 
-def query(track):
+def query(track, title_first=False):
     first = track["artists"].split(",")[0].strip()
-    return "%s - %s" % (first, track["title"]) if first else track["title"]
+    if not first:
+        return track["title"]
+    return "%s %s" % (track["title"], first) if title_first else "%s - %s" % (first, track["title"])
 
 
 def best_match(track, entries):

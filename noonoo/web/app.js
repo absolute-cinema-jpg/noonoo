@@ -658,7 +658,7 @@ const results = new ListView($("#results-wrap"), "results", resultCols, {
     const s = S.active;
     if (!s) return "";
     if (s.status === "error") return `<tr><td colspan="${resultCols.length}" class="err-banner">${esc(s.error)}</td></tr>`;
-    if (s.errors && s.errors.length) return `<tr><td colspan="${resultCols.length}" class="err-banner">Some links failed:\n${esc(s.errors.join("\n"))}</td></tr>`;
+    if (s.errors && s.errors.length) return `<tr><td colspan="${resultCols.length}" class="err-banner">Not in this list, so these won't download:\n${esc(s.errors.join("\n"))}</td></tr>`;
     if (s.status === "searching" && !s.items.length) return `<tr class="row-msg"><td colspan="${resultCols.length}">Searching... (the first lookup on a site can take a few seconds)</td></tr>`;
     if (s.login && s.login.length) return `<tr><td colspan="${resultCols.length}" class="info-banner">Signed in with your ${esc(s.loginBrowser)} login for ${esc(s.login.join(", "))} — the site wouldn't show this logged out.</td></tr>`;
     return "";
@@ -727,6 +727,12 @@ function runSearch(query, source) {
       if (isUrls && s.items.length === 1) s.label = s.items[0].title;
       if (isUrls && s.items.length > 1 && s.items[0].playlist) s.label = s.items[0].playlist;
       if (s.items.length === 1) s.sel.add(s.items[0]._id);  // single link: ready to hit Download
+      if (s.errors.length) {   // a banner is easy to miss under a long playlist
+        const n = s.errors.length;
+        msgbox("Not everything was found", `${n === 1 ? "This one" : `These ${n}`} won't download. NooNoo found the rest.
+<div class="missing-list">${esc(s.errors.join("\n"))}</div>`, { icon: "warn32" });
+        if (!document.hasFocus()) api("/api/notify/missing", { count: n, label: s.label }).catch(() => {});
+      }
       fetchDetails(s);
     })
     .catch((e) => { s.status = "error"; s.error = e.message; })
@@ -1381,7 +1387,7 @@ const OPTION_PAGES = [
   { id: "behaviour", label: "Behaviour", icon: "all16", fields: [
     { key: "default_kind", label: "Double-click / Enter downloads", type: "select", options: [["video", "Video"], ["audio", "Audio only"]] },
     { key: "instant_download", label: "Pasting a single link downloads it immediately (skip results list)", type: "check" },
-    { key: "notify_done", label: "Show a notification when a download finishes", type: "check" },
+    { key: "notify_done", label: "Show a notification when a download finishes or fails", type: "check" },
     { key: "auto_update_check", label: "Check for new versions of NooNoo automatically", type: "check",
       help: "One anonymous request to GitHub on launch and every few hours. Help › Check for Updates works either way." },
     { key: "auto_update_engine", label: "Keep the download engine (yt-dlp) up to date automatically", type: "check",

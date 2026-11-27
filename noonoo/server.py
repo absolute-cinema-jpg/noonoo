@@ -196,6 +196,11 @@ def make_handler(app):
                 if tools.missing():
                     raise RuntimeError("Download engine not installed yet - see Tools > Engine.")
                 return app.searcher.search(b.get("id") or "x", b.get("query", ""), b.get("source", "youtube"))
+            if path == "/api/notify/missing":   # fixed wording: a page can't use this to post its own text
+                if s["notify_done"]:
+                    n, label = int(b.get("count") or 0), str(b.get("label") or "the list")[:80]
+                    engine_mod.notify("Not everything was found", "%d from %s won't download." % (n, label))
+                return {"ok": True}
             if path == "/api/search/details":
                 return {"details": app.searcher.details(b.get("id") or "x", [u for u in b.get("urls", []) if u][:10],
                                                         b.get("kind", "video"))}

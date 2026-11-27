@@ -302,6 +302,7 @@ th.num { text-align: right; }
 .empty-state b { color: #333; font-size: 12px; }
 .empty-state svg { margin-bottom: 8px; opacity: .9; }
 .row-msg td { color: var(--muted); font-style: italic; }
+.missing-list { margin-top: 8px; max-height: 180px; overflow: auto; white-space: pre-wrap; user-select: text; -webkit-user-select: text; }
 .err-banner { padding: 6px 8px; background: #ffffe1; border-bottom: 1px solid #e0d8a0; color: #6a3a00; white-space: pre-wrap; user-select: text; -webkit-user-select: text; }
 
 /* XP progress bar */
