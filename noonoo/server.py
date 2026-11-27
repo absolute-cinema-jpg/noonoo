@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from . import editor as editor_mod
 from . import engine as engine_mod
 from . import settings as settings_mod
 from . import tools
@@ -18,15 +19,17 @@ from . import updater as updater_mod
 
 WEB_DIR = Path(__file__).parent / "web"
 TOKEN = secrets.token_urlsafe(24)
-# Remote images are search thumbnails. Scripts must be ours, so injected markup can't run code.
+# Remote images are search thumbnails; media is the trim window's preview, always served by us.
+# Scripts must be ours, so injected markup can't run code.
 CSP = ("default-src 'none'; script-src 'self' 'nonce-%s'; style-src 'self' 'unsafe-inline'; "
-       "img-src 'self' data: https: http:; connect-src 'self'; font-src 'self'; "
+       "img-src 'self' data: https: http:; media-src 'self'; connect-src 'self'; font-src 'self'; "
        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 
 
 class App:
     def __init__(self):
         self.engine = engine_mod.Engine()
+        self.library = editor_mod.Library(self.engine)
         self.updater = updater_mod.Updater()
         self.searcher = engine_mod.Searcher()
         self.tool_log = []
@@ -124,6 +127,48 @@ def make_handler(app):
             if self.command != "HEAD":
                 self.wfile.write(body)
 
+        def _file(self, path, ctype=None):
+            """A file, in the byte ranges a <video> asks for (WebKit won't play media without them)."""
+            try:
+                size = path.stat().st_size
+                f = open(path, "rb")
+            except OSError:
+                return self._send(404, {"error": "not found"})
+            with f:
+                ctype = ctype or mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+                m = re.match(r"bytes=(\d*)-(\d*)$", self.headers.get("Range") or "")
+                start, end = 0, size - 1
+                if m and (m.group(1) or m.group(2)):
+                    if m.group(1):
+                        start = int(m.group(1))
+                        end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+                    else:   # "bytes=-N": the last N bytes
+                        start = max(0, size - int(m.group(2)))
+                    if start > end or start >= size:
+                        return self._send(416, b"", ctype, {"Content-Range": "bytes */%d" % size})
+                self.send_response(206 if m else 200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(end - start + 1))
+                self.send_header("Accept-Ranges", "bytes")
+                if m:
+                    self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                if self.command == "HEAD":
+                    return
+                f.seek(start)
+                left = end - start + 1
+                try:
+                    while left > 0:
+                        chunk = f.read(min(left, 256 * 1024))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        left -= len(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass   # the player moved on to another range
+
         def _host_ok(self):
             host = (self.headers.get("Host") or "").split(":")[0]
             return host in ("127.0.0.1", "localhost")
@@ -168,6 +213,23 @@ def make_handler(app):
                                         "audio_formats": engine_mod.AUDIO_FORMATS,
                                         "cookie_sites": {k: v[0] for k, v in settings_mod.COOKIE_SITES.items()},
                                         "home": str(Path.home())})
+            if u.path == "/api/clip":   # the trim window's preview copy and sound picture
+                jid = (q.get("id") or [""])[0]
+                what = (q.get("what") or [""])[0]
+                names = {"video": "preview.mp4", "audio": "preview.m4a", "wave": "wave.png"}
+                if not re.fullmatch(r"[0-9a-f]{10}", jid) or what not in names or not app.engine.job(jid):
+                    return self._send(404, {"error": "not found"})
+                return self._file(engine_mod.TEMP_DIR / jid / names[what])
+            if u.path == "/api/edit/list":
+                return self._send(200, {"items": app.library.items()})
+            if u.path == "/api/edit/state":
+                return self._send(200, app.library.state((q.get("sid") or [""])[0]))
+            if u.path == "/api/edit/media":   # the Edit tab's playing copy and sound picture
+                sid = (q.get("sid") or [""])[0]
+                f = app.library.media(sid, (q.get("what") or [""])[0])
+                if not f or not app.library.path_of(sid):
+                    return self._send(404, {"error": "not found"})
+                return self._file(f)
             if u.path == "/api/tools":
                 return self._send(200, {"status": tools.status(), "missing": tools.missing(),
                                         "busy": app.tools_busy, "log": app.tool_log[-20:],
@@ -219,7 +281,30 @@ def make_handler(app):
             if path == "/api/download":
                 return {"ids": app.engine.add(b.get("items", []), b.get("kind", "video"), b.get("quality", ""),
                                               b.get("vformat", ""), b.get("aformat", ""), b.get("folder", ""),
-                                              b.get("fps", ""))}
+                                              b.get("fps", ""), b.get("clip"))}
+            if path == "/api/job/trim":
+                return {"ok": app.engine.set_trim(b.get("id"), b.get("start"), b.get("end"))}
+            if path == "/api/edit/add":
+                return app.library.add(b.get("path"))
+            if path == "/api/edit/open":
+                return app.library.open(b.get("sid"))
+            if path == "/api/edit/remove":
+                app.library.remove(b.get("sid"))
+                return {"ok": True}
+            if path == "/api/edit/export":
+                folder = clean_folder(b.get("folder") or s["output_dir"])
+                if folder.get("error"):
+                    raise RuntimeError(folder["error"])
+                if b.get("job"):
+                    return {"ok": app.engine.set_trim(b.get("job"), b.get("start"), b.get("end"), b.get("spec") or {}, folder["path"])}
+                sid = b.get("sid") or ""
+                src = app.library.path_of(sid)
+                info = editor_mod.load_info(sid, src) if src else None
+                if not info:
+                    raise RuntimeError("Open this file in the Edit tab first, so NooNoo can measure it")
+                return {"id": app.engine.add_export(src, sid, info["len"], b.get("start"), b.get("end"), b.get("spec") or {}, folder["path"])}
+            if path == "/api/choose-file":
+                return {"path": choose_file(b.get("start") or s["output_dir"])}
             if path == "/api/job/action":
                 ids = b.get("ids") or [b.get("id")]
                 for jid in ids:
@@ -261,6 +346,7 @@ def make_handler(app):
                 subprocess.Popen(["open", d])
             elif what in ("file", "reveal"):
                 downloaded = {os.path.realpath(f) for f in app.engine.known_files()}
+                downloaded |= {os.path.realpath(it["path"]) for it in app.library.items() if it.get("path")}
                 if os.path.realpath(target) not in downloaded or not os.path.exists(target):
                     raise RuntimeError("File not found (moved or deleted?)")
                 subprocess.Popen(["open", target] if what == "file" else ["open", "-R", target])
@@ -277,6 +363,16 @@ def choose_folder(start):
               % json.dumps(start or str(Path.home())))
     out = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
     return out.stdout.strip().rstrip("/") or None
+
+
+def choose_file(start):
+    start = os.path.expanduser(start)
+    while start and not os.path.isdir(start):
+        start = os.path.dirname(start)
+    script = ('POSIX path of (choose file with prompt "Add to the Edit tab:" of type {"public.movie", "public.audio"} '
+              'default location (POSIX file %s))' % json.dumps(start or str(Path.home())))
+    out = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    return out.stdout.strip() or None
 
 
 def window_action(app, action, args=None):

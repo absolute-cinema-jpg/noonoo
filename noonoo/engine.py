@@ -8,6 +8,7 @@ ffmpeg pass, so the download itself can always take the highest resolution on of
 import base64
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -35,6 +36,8 @@ ARCHIVE_DIR = tools.DATA_DIR / "archives"
 
 ACTIVE = ("starting", "downloading", "processing", "converting")
 FINISHED = ("done", "error", "cancelled", "skipped")
+# "trim": part of a video has downloaded and waits for the user to set its exact first and last frames
+CLIP_PAD = 2.0   # seconds downloaded either side of a part, so there's room to fine-trim
 AUDIO_SITES = {"soundcloud", "bandcamp", "mixcloud", "audiomack", "spotify", "applepodcasts",
                "podbeanpodcast", "hearthisat", "jamendo", "audius", "deezer"}
 URL_RE = re.compile(r"^(https?://|www\.)|^[\w-]+(\.[\w-]+)+/\S*$", re.I)
@@ -58,8 +61,14 @@ _DNXHR = lambda p: ["-c:v", "dnxhd", "-profile:v", p, "-pix_fmt", "yuv422p"]
 # key -> label, container yt-dlp merges into, and (for converted formats) the ffmpeg pass.
 # DNxHD is Avid's HD codec: fixed 1920x1080, a fixed bitrate per frame rate. DNxHR is the same family
 # without those limits, for keeping 4K / vertical / odd sizes at their own resolution.
+_PRORES = lambda p: ["-c:v", "prores_ks", "-profile:v", p, "-pix_fmt", "yuv422p10le", "-vendor", "apl0"]
 VIDEO_FORMATS = {
     "h264":     {"label": "MP4 · H.264", "merge": "mp4", "ext": "mp4", "edit": False},
+    "hevc":     {"label": "MP4 · H.265 (HEVC)", "merge": "mp4", "ext": "mp4", "edit": False, "hevc": True},
+    "prores_proxy": {"label": "ProRes 422 Proxy (.mov)", "merge": "mkv", "ext": "mov", "edit": True, "v": _PRORES("0")},
+    "prores_lt":    {"label": "ProRes 422 LT (.mov)", "merge": "mkv", "ext": "mov", "edit": True, "v": _PRORES("1")},
+    "prores_422":   {"label": "ProRes 422 (.mov)", "merge": "mkv", "ext": "mov", "edit": True, "v": _PRORES("2")},
+    "prores_hq":    {"label": "ProRes 422 HQ (.mov)", "merge": "mkv", "ext": "mov", "edit": True, "v": _PRORES("3")},
     "dnxhd_lb": {"label": "DNxHD LB (.mov)", "merge": "mkv", "ext": "mov", "edit": True, "dnxhd": 0},
     "dnxhd_sq": {"label": "DNxHD SQ (.mov)", "merge": "mkv", "ext": "mov", "edit": True, "dnxhd": 1},
     "dnxhd_hq": {"label": "DNxHD HQ (.mov)", "merge": "mkv", "ext": "mov", "edit": True, "dnxhd": 2},
@@ -89,6 +98,10 @@ def nearest_dnxhd_rate(rate):
 
 AUDIO_FORMATS = {"mp3": "MP3", "m4a": "M4A", "opus": "Opus", "flac": "FLAC", "wav": "WAV",
                  "wav_avid": "WAV 48k/24-bit", "best": "Original"}
+# how a cut piece of audio is encoded (yt-dlp does this for whole downloads): extension, ffmpeg codec
+AUDIO_ENCODERS = {"mp3": ("mp3", ["-c:a", "libmp3lame"]), "m4a": ("m4a", ["-c:a", "aac"]),
+                  "opus": ("opus", ["-c:a", "libopus"]), "flac": ("flac", ["-c:a", "flac"]),
+                  "wav": ("wav", ["-c:a", "pcm_s16le"]), "wav_avid": ("wav", _PCM)}
 
 
 def is_url(text):
@@ -399,7 +412,9 @@ class Job:
     FIELDS = ("id", "url", "title", "site", "uploader", "thumbnail", "duration", "kind", "quality",
               "status", "progress", "downloaded", "total", "speed", "eta", "stage", "filepath",
               "error", "added", "finished", "part", "parts", "vformat", "aformat", "folder",
-              "raw_file", "used_login", "playlist", "tags", "fps", "filename")
+              "raw_file", "used_login", "playlist", "tags", "fps", "filename",
+              "clip_start", "clip_end", "fine_trim", "trim_start", "trim_end",
+              "clip_offset", "clip_fps", "clip_frames", "clip_len", "source", "edit_id", "height", "target_mb")
 
     def __init__(self, **kw):
         self.id = uuid.uuid4().hex[:10]
@@ -433,6 +448,24 @@ class Job:
         self.tags = None          # {"title", "artist", "album"} from Spotify, written over YouTube's
         self.fps = "source"       # frame rate to conform converted video to
         self.filename = ""        # name the user chose, without an extension; "" = the usual pattern
+        # Part of a video: the rough range typed before downloading (seconds into the video), then the
+        # exact one picked in the trim window (seconds into the downloaded part: for video, frame n is at
+        # n / clip_fps). clip_offset is where in the video the part starts (its first frame, for video);
+        # clip_fps/frames/len describe the part, and clip_fps is "" for sound only.
+        self.clip_start = self.clip_end = None
+        self.fine_trim = False
+        self.trim_start = self.trim_end = None
+        self.clip_offset = 0.0
+        self.clip_fps = ""
+        self.clip_frames = 0
+        self.clip_len = None
+        # An export from the Edit tab: made from a file already on the Mac (never moved or changed), with
+        # edit_id naming its measurements in the edit library. height (short side) and target_mb (a file
+        # size to fit into) apply to any converted video; 0 = keep the size / no target.
+        self.source = ""
+        self.edit_id = ""
+        self.height = 0
+        self.target_mb = 0
         for k, v in kw.items():
             if k in self.FIELDS:
                 setattr(self, k, v)
@@ -440,6 +473,7 @@ class Job:
         self.log = deque(maxlen=300)
         self.tmpfiles = set()
         self.force = False
+        self._full = False   # the site wouldn't send just a part, so the whole video was downloaded
         self._intent = None  # "pause" | "cancel" while we are stopping the process
 
     def to_dict(self, with_log=False):
@@ -450,6 +484,17 @@ class Job:
 
     def converts(self):
         return self.kind == "video" and "ext" in VIDEO_FORMATS.get(self.vformat, {})
+
+    def is_clip(self):
+        return self.clip_start is not None and self.clip_end is not None
+
+    def clip_bounds(self):
+        """The stretch actually downloaded for a part: the typed range plus room either side."""
+        a = max(0.0, self.clip_start - CLIP_PAD)
+        b = self.clip_end + CLIP_PAD
+        if self.duration:
+            b = min(b, float(self.duration) + 1)
+        return a, b
 
     def fps_rate(self):
         """Target frame rate as an ffmpeg rational, or None to keep the source's."""
@@ -516,6 +561,7 @@ class Engine:
             "jobs": jobs,
             "active": len(active),
             "queued": sum(1 for j in jobs if j["status"] == "queued"),
+            "trim": sum(1 for j in jobs if j["status"] == "trim"),
             "speed": sum(j["speed"] or 0 for j in active if j["status"] == "downloading"),
         }
 
@@ -528,8 +574,9 @@ class Engine:
         with self.lock:
             return {p for j in self.jobs.values() for p in (j.filepath, j.raw_file) if p}
 
-    def add(self, items, kind, quality="", vformat="", aformat="", folder="", fps=""):
+    def add(self, items, kind, quality="", vformat="", aformat="", folder="", fps="", clip=None):
         s = settings_mod.load()
+        clip = _clean_clip(clip)
         fps = fps or s["edit_fps"]
         vformat = vformat if vformat in VIDEO_FORMATS else s["video_format"]
         aformat = aformat if aformat in AUDIO_FORMATS else s["audio_format"]
@@ -544,6 +591,8 @@ class Engine:
                         duration=it.get("duration"), kind=kind, quality=quality, vformat=vformat,
                         aformat=aformat, playlist=it.get("playlist", ""), tags=it.get("tags"), fps=fps,
                         folder=target_dir(s, kind, it, folder))
+                if clip:
+                    j.clip_start, j.clip_end, j.fine_trim = clip["start"], clip["end"], clip["fine"]
                 self.jobs[j.id] = j
                 self.order.append(j.id)
                 added.append(j.id)
@@ -568,10 +617,12 @@ class Engine:
                 if j.status not in ACTIVE:
                     self._reset(j)
                     j.force, j.raw_file = True, ""
+                    if j.fine_trim:   # a fresh download gets trimmed afresh
+                        j.trim_start = j.trim_end = None
             elif act == "cancel":
                 if j.status in ACTIVE:
                     self._stop(j, "cancel")
-                elif j.status in ("queued", "paused"):
+                elif j.status in ("queued", "paused", "trim"):
                     j.status = "cancelled"
                     self._cleanup_tmp(j)
             elif act == "remove":
@@ -586,6 +637,53 @@ class Engine:
                 k = i - 1 if act == "up" else i + 1
                 if 0 <= k < len(self.order):
                     self.order[i], self.order[k] = self.order[k], self.order[i]
+            self._changed()
+        self._pump()
+        return True
+
+    def add_export(self, src, edit_id, length, start, end, spec, folder):
+        """Queue an export from the Edit tab. start/end: seconds into the file (for video, frame n is at
+        n / fps), or None for the whole of it."""
+        s = settings_mod.load()
+        opts = export_options(spec, s)
+        start, end = _clean_range(start, end, length)
+        stem = os.path.splitext(os.path.basename(src))[0]
+        with self.lock:
+            span = (end if end is not None else float(length or 0)) - (start or 0.0)
+            j = Job(url="", site="Edit", source=src, edit_id=edit_id, duration=round(span, 3) or None, folder=folder,
+                    trim_start=start, trim_end=end, **opts)
+            if opts["kind"] == "video":
+                j.quality = "%dp" % j.height if j.height else ""
+            j.title = j.filename or stem
+            self.jobs[j.id] = j
+            self.order.append(j.id)
+            self._changed()
+        self._pump()
+        return j.id
+
+    def set_trim(self, jid, start, end, spec=None, folder=""):
+        """The trim window's first and last frames (seconds into the downloaded part, end not included),
+        and from the Edit tab, what to save them as."""
+        with self.lock:
+            j = self.jobs.get(jid)
+            if not j or j.status != "trim":
+                raise RuntimeError("This download isn't waiting to be trimmed")
+            start, end = float(start), float(end)
+            if not (0 <= start < end <= (j.clip_len or end) + 0.5):
+                raise RuntimeError("Pick an In point before the Out point")
+            if spec:
+                opts = export_options(spec, settings_mod.load())
+                if opts["kind"] == "video" and not j.clip_fps:
+                    raise RuntimeError("This part is sound only, so it can only be saved as audio")
+                for k, v in opts.items():
+                    if k != "filename" or v:
+                        setattr(j, k, v)
+                if opts["kind"] == "video":
+                    j.quality = "%dp" % j.height if j.height else j.quality
+                if folder:
+                    j.folder = folder
+            j.trim_start, j.trim_end = start, end
+            self._reset(j)
             self._changed()
         self._pump()
         return True
@@ -667,8 +765,11 @@ class Engine:
             self._changed()
 
     def _run(self, j, s):
-        if j.converts() and j.raw_file and os.path.exists(j.raw_file):
-            result, err = "ok", ""      # downloaded earlier; only the conversion is left
+        resumed = bool(not j.source and j.raw_file and os.path.exists(j.raw_file) and (j.converts() or j.is_clip()))
+        if j.source:
+            result, err = self._export(j, s)
+        elif resumed:
+            result, err = "ok", ""      # downloaded earlier; only the trim / conversion is left
             j.filepath = j.raw_file
         else:
             allowed = login_allowed(s, j.url)
@@ -684,8 +785,27 @@ class Engine:
                 with_login = True
                 result, err = self._download(j, s, True)
             result, err = self._retry_refused(j, s, with_login, result, err)
+            if result == "error" and j.is_clip() and not j._full:
+                # some sites (and live streams) won't send just a part: get the whole video and cut it here
+                j.log.append("== Couldn't download just this part (%s): downloading the whole video instead" % err.strip()[:120])
+                j._full = True
+                with self.lock:
+                    j.status, j.stage, j.progress, j.part, j._cur, j._base = "starting", "Getting the whole video...", 0, 0, None, 0
+                    self._changed()
+                result, err = self._download(j, s, with_login)
             if with_login and result == "ok":
                 j.used_login = login_label(s)
+        if result == "ok" and j.is_clip() and not j.source:
+            if not resumed:
+                result, err = self._prepare_clip(j, s)
+            if result == "ok" and j.trim_end is None:
+                if j.fine_trim:
+                    result = "trim"
+                else:   # the typed range, to the nearest frames
+                    j.trim_start = max(0.0, j.clip_start - j.clip_offset)
+                    j.trim_end = max(j.trim_start + 0.001, j.clip_end - j.clip_offset)
+            if result == "ok":
+                result, err = self._cut(j, s)
         if result == "ok" and j.filepath and j.filepath.startswith(str(TEMP_DIR)) and j.tags:
             result, err = self._retag(j, s, j.filepath)
         if result == "ok" and j.kind == "audio" and j.fps_rate() and j.filepath.lower().endswith(".wav") \
@@ -706,6 +826,8 @@ class Engine:
             elif result == "cancelled":
                 j.status, j.stage = "cancelled", ""
                 self._cleanup_tmp(j)
+            elif result == "trim":
+                j.status, j.stage, j.progress = "trim", "", 100.0
             elif result == "ok":
                 self._cleanup_tmp(j)
                 j.status = "done" if j.filepath else "skipped"
@@ -721,10 +843,12 @@ class Engine:
             j.finished = time.time()
             j._intent = None
             self._changed()
-        if j.status == "done" and s["notify_done"]:
-            notify("Download complete", j.title)
+        if j.status == "trim" and s["notify_done"]:
+            notify("Ready to trim", "%s: double-click it in Monitor to set the exact frames." % j.title)
+        elif j.status == "done" and s["notify_done"]:
+            notify("Export complete" if j.source else "Download complete", j.title)
         elif j.status == "error" and s["notify_done"]:
-            notify("Download failed", "%s: %s" % (j.title or j.url, j.error))
+            notify("Export failed" if j.source else "Download failed", "%s: %s" % (j.title or j.url, j.error))
         self._pump()
 
     def _retry_refused(self, j, s, with_login, result, err):
@@ -769,10 +893,14 @@ class Engine:
             return "ok", ""
         return "error", errors[-1] if errors else "yt-dlp exited with code %s" % proc.returncode
 
-    def _convert(self, j, s):
-        """ffmpeg pass to H.264 / DNxHR / ProRes. Returns (ok|paused|cancelled|error, message)."""
+    def _convert(self, j, s, clip=None, name=None, src=None, seek=None):
+        """ffmpeg pass to H.264 / H.265 / DNxHD / DNxHR / ProRes. Returns (ok|paused|cancelled|error, message).
+        clip = (first frame, frame after the last, their times in seconds): keep only those frames.
+        src = the file to convert (default: the download). seek = start reading it there (seconds into it),
+        so a short stretch of a long file doesn't mean decoding everything before it; clip then counts
+        frames and times from that point."""
         spec = VIDEO_FORMATS[j.vformat]
-        src = j.raw_file
+        src = src or j.raw_file
         try:
             probe = json.loads(subprocess.run(
                 [str(tools.path("ffprobe")), "-v", "error", "-show_streams", "-show_format", "-of", "json", src],
@@ -784,64 +912,112 @@ class Engine:
         pics = [x for x in streams if x.get("codec_type") == "video" and x.get("disposition", {}).get("attached_pic")]
         audio = [x for x in streams if x.get("codec_type") == "audio"]
         main = video[0] if video else {}
-        if not video or (j.vformat == "h264" and main.get("codec_name") == "h264" and src.endswith(".mp4")
-                         and not j.fps_rate() and all(a.get("codec_name") in ("aac", "mp3") for a in audio)):
+        if not video and (clip or j.source):
+            return "error", "There's no picture in %s" % os.path.basename(src)
+        if not clip and not j.source and (not video or (
+                j.vformat == "h264" and main.get("codec_name") == "h264" and src.endswith(".mp4") and not j.fps_rate()
+                and not j.height and not j.target_mb and all(a.get("codec_name") in ("aac", "mp3") for a in audio))):
             return self._deliver(j, src)  # audio-only source, or already plays everywhere
 
+        work = TEMP_DIR / j.id
+        work.mkdir(parents=True, exist_ok=True)
         # a leading dot, because a chosen file name never has one, so src can't be called this too
-        dst = os.path.join(os.path.dirname(src), ".converting." + spec["ext"])
+        dst = str(work / (".converting." + spec["ext"]))
         duration = float(probe.get("format", {}).get("duration") or j.duration or 0)
         fps = main.get("avg_frame_rate") or main.get("r_frame_rate") or "30/1"
         if fps in ("0/0", "0/1"):
             fps = main.get("r_frame_rate") or "30/1"
+        out_rate = j.fps_rate() or fps
 
-        cmd = [str(tools.path("ffmpeg")), "-hide_banner", "-nostdin", "-y", "-i", src,
-               "-map", "0:%d" % main["index"], "-map", "0:a:0?", "-map_metadata", "0",
-               "-filter:v:0", "scale=trunc(iw/2)*2:trunc(ih/2)*2"]  # even sizes; leaves cover art alone
+        cmd = [str(tools.path("ffmpeg")), "-hide_banner", "-nostdin", "-y"]
+        if seek is not None:
+            cmd += ["-ss", "%.6f" % seek]
+            if clip:   # read no further than needed
+                cmd += ["-t", "%.6f" % (clip[3] + 1)]
+        cmd += ["-i", src, "-map", "0:%d" % main["index"], "-map", "0:a:0?", "-map_metadata", "0"]
+        # picture size: even numbers always; a chosen height is the short side (so vertical video stays vertical)
+        h = int(j.height or 0)
+        size = ("scale='if(gte(iw,ih),-2,%d)':'if(gte(iw,ih),%d,-2)':flags=lanczos" % (h, h) if h
+                else "scale=trunc(iw/2)*2:trunc(ih/2)*2")
+        vf, af, extra = [size], None, []
+        if (clip or j.source) and s["embed_metadata"]:
+            extra += ["-metadata", "title=" + j.title]
+        if clip:
+            # Counting decoded frames is exact whatever the timestamps say; the sound is cut at those
+            # frames' own times. Both happen before any frame-rate change.
+            first, after, t_in, t_out = clip
+            duration = t_out - t_in
+            pics = []
+            af = _sound_at(t_in, duration)
+            vf.insert(0, "trim=start_frame=%d:end_frame=%d,setpts=PTS-STARTPTS" % (first, after))
+            extra += ["-map_chapters", "-1"]
+        target = None
         if "dnxhd" in spec:
-            rate = nearest_dnxhd_rate(j.fps_rate() or fps)
+            rate = nearest_dnxhd_rate(out_rate)
             mbps = DNXHD_RATES[rate][spec["dnxhd"]]
-            fit = ("scale=1920:1080:force_original_aspect_ratio=decrease:flags=lanczos,"
-                   "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1")   # letterbox / pillarbox anything that isn't 16:9
-            i = cmd.index("-filter:v:0")
-            cmd[i + 1] = fit
-            cmd += ["-c:v", "dnxhd", "-profile:v", "dnxhd", "-b:v", "%dM" % mbps, "-pix_fmt", "yuv422p",
-                    "-r", rate, "-fps_mode", "cfr", "-map_chapters", "-1", "-dn", "-movflags", "+write_colr"] + _PCM
+            vf[-1] = ("scale=1920:1080:force_original_aspect_ratio=decrease:flags=lanczos,"
+                      "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1")   # letterbox / pillarbox anything that isn't 16:9
+            venc = ["-c:v", "dnxhd", "-profile:v", "dnxhd", "-b:v", "%dM" % mbps, "-pix_fmt", "yuv422p",
+                    "-r", rate, "-fps_mode", "cfr"]
+            aenc = _PCM
+            extra += ["-map_chapters", "-1", "-dn", "-movflags", "+write_colr"]
         elif spec.get("edit"):
-            cmd += spec["v"] + ["-r", j.fps_rate() or fps, "-fps_mode", "cfr", "-map_chapters", "-1", "-dn"] + _PCM
-            if spec["ext"] == "mov":
-                cmd += ["-movflags", "+write_colr"]
-        else:  # H.264 on the Mac's media engine; bitrate scaled to picture size
-            w, h = main.get("width") or 1920, main.get("height") or 1080
-            if j.fps_rate():
-                cmd += ["-r", j.fps_rate(), "-fps_mode", "cfr"]
-            try:
-                n, _, d = (j.fps_rate() or fps).partition("/")
-                rate = float(n) / float(d or 1)
-            except (ValueError, ZeroDivisionError):
-                rate = 30.0
-            kbps = max(2500, int(w * h * min(rate, 60) * 0.12 / 1000))
-            cmd += ["-c:v:0", "h264_videotoolbox", "-b:v:0", "%dk" % kbps, "-profile:v:0", "high",
-                    "-pix_fmt:v:0", "yuv420p", "-tag:v:0", "avc1", "-movflags", "+faststart"]
-            ok_audio = audio and audio[0].get("codec_name") in ("aac", "mp3")
-            cmd += ["-c:a", "copy"] if ok_audio else ["-c:a", "aac", "-b:a", "256k"]
+            venc = spec["v"] + ["-r", out_rate, "-fps_mode", "cfr"]
+            aenc = _PCM
+            extra += ["-map_chapters", "-1", "-dn", "-movflags", "+write_colr"]
+        else:  # H.264 / H.265 on the Mac's media engine; bitrate scaled to picture size
+            hevc = bool(spec.get("hevc"))
+            w0, h0 = main.get("width") or 1920, main.get("height") or 1080
+            if h:
+                k = h / max(1, min(w0, h0))
+                w0, h0 = w0 * k, h0 * k
+            rate = _rate_value(out_rate) or 30.0
+            kbps = max(2500, int(w0 * h0 * min(rate, 60) * 0.12 / 1000))
+            if hevc:
+                kbps = max(1800, int(kbps * 0.6))
+            venc = (["-r", j.fps_rate(), "-fps_mode", "cfr"] if j.fps_rate() else [])
+            tag = ["-tag:v:0", "hvc1" if hevc else "avc1"]
+            hw = ["-c:v:0", "hevc_videotoolbox" if hevc else "h264_videotoolbox", "-b:v:0", "%dk" % kbps]
+            if not hevc:
+                hw += ["-profile:v:0", "high"]
+            ok_audio = audio and audio[0].get("codec_name") in ("aac", "mp3") and not clip   # a cut can't copy
+            aenc = ["-c:a", "copy"] if ok_audio else ["-c:a", "aac", "-b:a", "256k"]
+            if j.target_mb:
+                target = self._size_budget(j, duration, bool(audio))
+                if isinstance(target, str):
+                    return "error", target
+                aenc = ["-c:a", "aac", "-b:a", "%dk" % target[1]]
+                hw = ["-c:v:0", "libx265" if hevc else "libx264", "-b:v:0", "%dk" % target[0], "-preset", "medium"]
+            venc += hw + ["-pix_fmt:v:0", "yuv420p"] + tag
+            extra += ["-movflags", "+faststart"]
             if pics:  # keep the cover art the download embedded
-                cmd += ["-map", "0:%d" % pics[0]["index"], "-c:v:1", "copy", "-disposition:v:1", "attached_pic"]
-        cmd += ["-progress", "pipe:1", "-nostats", dst]
+                extra += ["-map", "0:%d" % pics[0]["index"], "-c:v:1", "copy", "-disposition:v:1", "attached_pic"]
+
+        def build(v, pass_args=None, to=dst):
+            if to == os.devnull:   # a measuring pass: picture only
+                return cmd + ["-filter:v:0", ",".join(vf)] + v + pass_args + ["-an", "-f", "null", "-progress", "pipe:1", "-nostats", to]
+            c = cmd + ["-filter:v:0", ",".join(vf)] + (["-filter:a:0", af] if af else []) + v
+            return c + (pass_args or []) + aenc + extra + ["-progress", "pipe:1", "-nostats", to]
 
         label = spec["label"].split(" (")[0]
         if "dnxhd" in spec:
-            label = "DNxHD %d" % DNXHD_RATES[nearest_dnxhd_rate(j.fps_rate() or fps)][spec["dnxhd"]]
+            label = "DNxHD %d" % DNXHD_RATES[nearest_dnxhd_rate(out_rate)][spec["dnxhd"]]
+        verb = "Exporting" if j.source else "Converting"
         with self.lock:
-            j.status, j.stage, j.progress, j.speed, j.eta = "converting", "Converting to " + label, 0, None, None
+            j.status, j.stage, j.progress, j.speed, j.eta = "converting", "%s to %s" % (verb, label), 0, None, None
             self._changed()
-        rc, err = self._ffmpeg(j, cmd, duration, label)
-        if rc != 0 and not j._intent and not spec.get("edit"):
-            # no hardware encoder (old Intel Mac, odd size): software x264 instead
-            j.log.append("== hardware H.264 failed, retrying with x264")
-            i = cmd.index("h264_videotoolbox")
-            cmd[i:i + 3] = ["libx264", "-crf", "18", "-preset", "fast"]
-            rc, err = self._ffmpeg(j, cmd, duration, label)
+        if target:
+            rc, err = self._two_pass(j, build, venc, duration, label, verb, dst, target)
+        else:
+            rc, err = self._ffmpeg(j, build(venc), duration, label, verb=verb)
+            if rc != 0 and not j._intent and not spec.get("edit"):
+                # no hardware encoder (old Intel Mac, odd size): software x264 / x265 instead
+                j.log.append("== hardware encoder failed, retrying in software")
+                i = venc.index("-c:v:0")
+                sw = ["libx265", "-crf", "22"] if spec.get("hevc") else ["libx264", "-crf", "18"]
+                venc = venc[:i] + ["-c:v:0", sw[0], sw[1], sw[2], "-preset", "fast"] + \
+                    [a for a in venc[i + 4:] if a not in ("-profile:v:0", "high")]
+                rc, err = self._ffmpeg(j, build(venc), duration, label, verb=verb)
         if j._intent or rc != 0:
             try:
                 os.remove(dst)
@@ -849,15 +1025,302 @@ class Engine:
                 pass
             if j._intent:
                 return ("paused" if j._intent == "pause" else "cancelled"), ""
-            return "error", "Conversion to %s failed: %s" % (label, err)
+            return "error", "%s to %s failed: %s" % ("Export" if j.source else "Conversion", label, err)
         try:
-            final = _place(dst, j.folder, os.path.splitext(os.path.basename(src))[0] + "." + spec["ext"])
+            final = _place(dst, j.folder, (name or os.path.splitext(os.path.basename(src))[0]) + "." + spec["ext"])
         except OSError as e:
             return "error", "Couldn't save into %s: %s" % (j.folder, e)
-        if s["keep_original"]:
+        if s["keep_original"] and not clip and not j.source:
             self._deliver(j, src)
-        j.filepath, j.raw_file = final, ""
+        j.filepath = final
+        if not j.source:
+            j.raw_file = ""
         return "ok", ""
+
+    def _size_budget(self, j, duration, has_audio):
+        """Bitrates (video, audio kb/s) that fill target_mb, a little under (containers add a few %),
+        or why it can't be done."""
+        if duration <= 0:
+            return "NooNoo couldn't tell how long this is, so it can't aim for a file size"
+        total = j.target_mb * 8000 * 0.96 / duration          # MB as Finder counts them: 1,000,000 bytes
+        a = 0
+        if has_audio:
+            a = 160 if total > 3000 else 128 if total > 1000 else 96 if total > 400 else 64 if total > 150 else 32
+        v = int(total - a)
+        if v < 50:
+            need = (50 + a) * duration / (8000 * 0.96)
+            return ("%g MB is too small for %s of video. Make the part shorter or the size at least %d MB."
+                    % (j.target_mb, _dur_text(duration), math.ceil(need)))
+        return v, a
+
+    def _two_pass(self, j, build, venc, duration, label, verb, dst, target):
+        """Aim for a file size: x264 / x265 measure the video in a first pass, then share the bits out in the
+        second. If the file still comes out too big, the second pass runs again a little smaller."""
+        log = str(TEMP_DIR / j.id / "pass")
+        x265 = "libx265" in venc
+        def passes(n):
+            return (["-x265-params", "pass=%d:stats=%s.x265" % (n, log)] if x265
+                    else ["-pass", str(n), "-passlogfile", log])
+        rc, err = self._ffmpeg(j, build(venc, passes(1), os.devnull), duration, label,
+                               verb="Measuring (pass 1 of 2)", span=(0, 40))
+        if rc != 0 or j._intent:
+            return rc, err
+        limit = j.target_mb * 1e6
+        v_kbps = target[0]
+        for attempt in range(3):
+            i = venc.index("-b:v:0")
+            venc[i + 1] = "%dk" % v_kbps
+            rc, err = self._ffmpeg(j, build(venc, passes(2)), duration, label,
+                                   verb="%s (pass 2 of 2)" % verb, span=(40, 100))
+            if rc != 0 or j._intent:
+                return rc, err
+            got = os.path.getsize(dst)
+            j.log.append("== %.2f MB (aiming for %g MB at %d kb/s video)" % (got / 1e6, j.target_mb, v_kbps))
+            if got <= limit:
+                return 0, ""
+            v_kbps = int(v_kbps * limit / got * 0.95)
+            if v_kbps < 30:
+                break
+        return 1, "it came out bigger than %g MB, even at the lowest quality" % j.target_mb
+
+    # ---- parts of videos --------------------------------------------------
+    def _prepare_clip(self, j, s):
+        """A part has downloaded: measure it, and make the small copy the trim window plays."""
+        work = TEMP_DIR / j.id
+        src = j.filepath
+        stem, ext = os.path.splitext(os.path.basename(src))
+        ffmpeg, ffprobe = str(tools.path("ffmpeg")), str(tools.path("ffprobe"))
+        a, b = j.clip_bounds()
+        with self.lock:
+            j.status, j.stage, j.speed, j.eta = "processing", "Measuring the part...", None, None
+            self._changed()
+        if j._full:   # take the same stretch out of the whole video, the way yt-dlp would have
+            part = str(work / ("part" + ext))
+            out = subprocess.run([ffmpeg, "-hide_banner", "-nostdin", "-y", "-copyts", "-ss", "%.3f" % a, "-to", "%.3f" % b,
+                                  "-i", src, "-map", "0", "-c", "copy", part],
+                                 capture_output=True, text=True, errors="replace")
+            if out.returncode != 0:
+                j.log.append(out.stderr.strip()[-500:])
+                return "error", "Couldn't take the part out of the downloaded video"
+            os.remove(src)
+            src = part
+        j.filepath = j.raw_file = src
+        try:
+            probe = json.loads(subprocess.run([ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", src],
+                                              capture_output=True, text=True, timeout=60).stdout or "{}")
+        except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+            return "error", "Couldn't read the downloaded part: %s" % e
+        streams = probe.get("streams", [])
+        video = [x for x in streams if x.get("codec_type") == "video" and not x.get("disposition", {}).get("attached_pic")]
+        has_audio = any(x.get("codec_type") == "audio" for x in streams)
+        # The part keeps the video's own timestamps (seconds into the whole video), but ffmpeg's filters
+        # count from the file's first timestamp, t0, so cut times are measured from there.
+        info = {"name": stem, "t0": float(probe.get("format", {}).get("start_time") or 0), "pts": []}
+        j.clip_offset = info["t0"]   # where in the video the part starts; for video, its first frame
+        if video and j.kind == "video":
+            fr = video[0].get("avg_frame_rate") or "0/0"
+            if _rate_value(fr) <= 0:
+                fr = video[0].get("r_frame_rate") or "30/1"
+            # every frame's own time, in the order ffmpeg hands them to the cut
+            try:
+                out = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                      "frame=best_effort_timestamp_time", "-of", "csv=p=0", src],
+                                     capture_output=True, text=True, timeout=900)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                return "error", "Couldn't read the downloaded part's frames: %s" % e
+            for line in out.stdout.splitlines():
+                try:
+                    info["pts"].append(float(line.split(",")[0]))
+                except ValueError:
+                    pass
+            if not info["pts"]:
+                return "error", "The downloaded part has no frames in it"
+            j.clip_fps, j.clip_frames = fr, len(info["pts"])
+            j.clip_len = len(info["pts"]) / _rate_value(fr)
+            j.clip_offset = info["pts"][0]
+        elif has_audio:
+            j.clip_fps, j.clip_frames = "", 0
+            j.clip_len = _audio_end(src) - info["t0"] or None   # the container's own duration can't be trusted here
+        else:
+            return "error", "The downloaded part has no picture or sound in it"
+        with open(work / "clip.json", "w") as f:
+            json.dump(info, f)
+        if j.fine_trim and j.trim_end is None:
+            return self._make_preview(j, src, has_audio, info["t0"])
+        return "ok", ""
+
+    def _make_preview(self, j, src, has_audio, t0=0.0):
+        """The trim window's copy of the part: small, and with every frame kept and evenly spaced, so
+        frame n plays at exactly n / fps and the window can tell the engine which frames it means."""
+        work = TEMP_DIR / j.id
+        ffmpeg = str(tools.path("ffmpeg"))
+        with self.lock:
+            j.status, j.stage, j.progress = "converting", "Making the trim preview...", 0
+            self._changed()
+        cmd = [ffmpeg, "-hide_banner", "-nostdin", "-y", "-i", src]
+        if j.clip_fps:
+            n, _, d = j.clip_fps.partition("/")
+            n, d = int(n), int(d or 1)
+            dst = str(work / "preview.mp4")
+            # frame n at n / fps, and the sound kept at its own time against the first frame
+            cmd += ["-map", "0:v:0", "-map", "0:a:0?",
+                    "-vf", "setpts=N*%d/%d/TB,scale=-2:'min(540,ih)',format=yuv420p" % (d, n),
+                    "-af", _sound_at(j.clip_offset - t0),
+                    "-fps_mode", "passthrough", "-video_track_timescale", str(n),
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-g", "12", "-bf", "0",
+                    "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-movflags", "+faststart"]
+        else:
+            dst = str(work / "preview.m4a")
+            cmd += ["-map", "0:a:0", "-vn", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
+        cmd += ["-progress", "pipe:1", "-nostats", dst]
+        rc, err = self._ffmpeg(j, cmd, j.clip_len, "preview", verb="Making the trim preview")
+        if j._intent:
+            return ("paused" if j._intent == "pause" else "cancelled"), ""
+        if rc != 0:
+            return "error", "Couldn't make the trim preview: %s" % err
+        if has_audio:   # a picture of the sound, drawn under the timeline (so lined up with the frames)
+            line = _sound_at(j.clip_offset - t0, j.clip_len) + "," if j.clip_fps else ""
+            try:
+                subprocess.run([ffmpeg, "-hide_banner", "-nostdin", "-y", "-i", src, "-lavfi",
+                                "[0:a:0]%saformat=channel_layouts=mono,showwavespic=s=1600x120:colors=0x2f5ba8" % line,
+                                "-frames:v", "1", str(work / "wave.png")], capture_output=True, timeout=300)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        return "ok", ""
+
+    def _cut(self, j, s):
+        """Keep only the frames (or stretch of sound) picked for a part, encoded once in the chosen format."""
+        try:
+            with open(TEMP_DIR / j.id / "clip.json") as f:
+                info = json.load(f)
+        except (OSError, ValueError):
+            return "error", "The downloaded part's details are missing. Press Retry to download it again."
+        if not j.clip_fps:
+            return self._cut_audio(j, s, info)
+        fps = _rate_value(j.clip_fps)
+        pts, t0 = info["pts"], info["t0"]
+        first = max(0, min(len(pts) - 1, int(round(j.trim_start * fps))))
+        after = max(first + 1, min(len(pts), int(round(j.trim_end * fps))))
+        t_in = pts[first] - t0
+        t_out = (pts[after] if after < len(pts) else pts[-1] + 1 / fps) - t0
+        j._clip_label = _clip_label(pts[first], pts[after - 1], fps)   # frame times are times in the video
+        if j.kind == "audio":   # the sound under those frames only
+            return self._encode_audio(j, s, j.raw_file, t_in, t_out, info["name"] + j._clip_label)
+        j.log.append("== Keeping frames %d to %d of the part (%d frames)" % (first, after - 1, after - first))
+        return self._convert(j, s, clip=(first, after, t_in, t_out), name=j.filename or info["name"] + j._clip_label)
+
+    def _cut_audio(self, j, s, info):
+        t_in, t_out = j.trim_start, j.trim_end
+        j._clip_label = _clip_label(j.clip_offset + t_in, j.clip_offset + t_out)
+        return self._encode_audio(j, s, j.raw_file, t_in, t_out, info["name"] + j._clip_label)
+
+    def _encode_audio(self, j, s, src, t_in, t_out, name, seek=False):
+        """The sound from t_in to t_out (seconds from the start of src), encoded once in the chosen audio
+        format, into the job's workspace. seek: jump there first (quick on a long file)."""
+        fmt = j.aformat if j.aformat in AUDIO_ENCODERS else ""
+        if not fmt:   # "Original": the same kind of file the site sent
+            try:
+                codec = subprocess.run([str(tools.path("ffprobe")), "-v", "error", "-select_streams", "a:0", "-show_entries",
+                                        "stream=codec_name", "-of", "csv=p=0", src], capture_output=True, text=True,
+                                       timeout=60).stdout.strip()
+            except (OSError, subprocess.TimeoutExpired):
+                codec = ""
+            if not codec:
+                return "error", "There's no sound in %s" % os.path.basename(src)
+            fmt = {"aac": "m4a", "opus": "opus", "mp3": "mp3", "flac": "flac"}.get(codec, "m4a")
+        ext, enc = AUDIO_ENCODERS[fmt]
+        q = (s["audio_quality"] or "0").strip()
+        dur = t_out - t_in
+        if j.target_mb:
+            if fmt not in ("mp3", "m4a", "opus"):
+                return "error", "%s files can't be made to fit a size: pick MP3, M4A or Opus" % fmt.upper().split("_")[0]
+            kbps = int(j.target_mb * 8000 * 0.96 / max(0.01, dur))
+            if kbps < 32:
+                return "error", "%g MB is too small for %s of sound. Make it at least %d MB." % (
+                    j.target_mb, _dur_text(dur), math.ceil(32 * dur / (8000 * 0.96)))
+            if fmt == "mp3":   # MP3 only has these rates, and rounds anything else up
+                kbps = max([r for r in (32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320) if r <= kbps])
+                enc = enc + ["-b:a", "%dk" % kbps, "-id3v2_version", "3"]
+            else:
+                enc = enc + ["-b:a", "%dk" % min(int(kbps * 0.97), 256)]
+        elif fmt == "mp3":
+            enc = enc + (["-q:a", q] if q.isdigit() else ["-b:a", q]) + ["-id3v2_version", "3"]
+        elif fmt in ("m4a", "opus"):
+            enc = enc + ["-b:a", q if not q.isdigit() else ("256k" if fmt == "m4a" else "160k")]
+        out_dir = TEMP_DIR / j.id / "out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dst = str(out_dir / (name + "." + ext))
+        cmd = [str(tools.path("ffmpeg")), "-hide_banner", "-nostdin", "-y"]
+        if seek:
+            cmd += ["-ss", "%.6f" % t_in, "-t", "%.6f" % dur, "-i", src, "-af", "asetpts=PTS-STARTPTS"]
+        else:
+            cmd += ["-i", src, "-af", "atrim=start=%.6f:end=%.6f,asetpts=PTS-STARTPTS" % (t_in, t_out)]
+        cmd += ["-map", "0:a:0", "-map_metadata", "0", "-vn"] + enc
+        if s["embed_metadata"]:
+            cmd += ["-metadata", "title=" + j.title]
+        cmd += ["-progress", "pipe:1", "-nostats", dst]
+        verb = "Exporting" if j.source else "Cutting"
+        with self.lock:
+            j.status, j.stage, j.progress, j.speed, j.eta = "converting", verb + " the sound...", 0, None, None
+            self._changed()
+        rc, err = self._ffmpeg(j, cmd, dur, "part", verb=verb)
+        if j._intent or rc != 0:
+            try:
+                os.remove(dst)
+            except OSError:
+                pass
+            if j._intent:
+                return ("paused" if j._intent == "pause" else "cancelled"), ""
+            return "error", "Couldn't %s the sound: %s" % ("export" if j.source else "cut", err)
+        j.filepath = dst
+        return "ok", ""
+
+    def _export(self, j, s):
+        """An export from the Edit tab: the frames (or stretch of sound) picked, from a file already on the
+        Mac, in the format, size and frame rate chosen. The file itself is only read."""
+        from . import editor
+        src = j.source
+        if not os.path.isfile(src):
+            return "error", "%s isn't there any more (moved or deleted?)" % src
+        info = editor.load_info(j.edit_id, src)
+        if not info:
+            return "error", "NooNoo hasn't measured this file yet. Open it in the Edit tab, then export again."
+        with self.lock:
+            j.status, j.stage, j.speed, j.eta = "processing", "Getting ready...", None, None
+            self._changed()
+        stem = os.path.splitext(os.path.basename(src))[0]
+        tc0 = info.get("tc0") or 0.0
+        if info.get("fps"):
+            fps, pts = _rate_value(info["fps"]), info["pts"]
+            n = len(pts)
+            first = 0 if j.trim_start is None else max(0, min(n - 1, int(round(j.trim_start * fps))))
+            after = n if j.trim_end is None else max(first + 1, min(n, int(round(j.trim_end * fps))))
+            t_in, t_out = pts[first], (pts[after] if after < n else pts[-1] + 1 / fps)
+            label = _clip_label(tc0 + pts[first], tc0 + pts[after - 1], fps) if first > 0 or after < n else ""
+        else:
+            fps = 0
+            t_in = j.trim_start or 0.0
+            t_out = j.trim_end if j.trim_end is not None else info["len"]
+            first, after = 0, 0
+            label = _clip_label(tc0 + t_in, tc0 + t_out) if t_in > 0.0005 or t_out < info["len"] - 0.0005 else ""
+        name = j.filename or export_name(stem, label, j)
+        with self.lock:   # Monitor lists it by the name it's saved as, and its real picture size
+            j.title = name
+            if j.kind == "video" and info.get("height"):
+                short = min(info["height"], info.get("width") or info["height"])
+                j.quality = "%dp" % (j.height or short) if not VIDEO_FORMATS[j.vformat].get("dnxhd") else "1080p"
+            self._changed()
+        if j.kind == "audio":
+            j.log.append("== Exporting the sound from %.3f s to %.3f s of %s" % (t_in, t_out, src))
+            return self._encode_audio(j, s, src, t_in, t_out, name, seek=True)
+        if not fps:
+            return "error", "There's no picture in %s to export as video" % os.path.basename(src)
+        j.log.append("== Exporting frames %d to %d of %s (%d frames)" % (first, after - 1, src, after - first))
+        # Start reading halfway between the frame before In and In itself, so In is the first frame left.
+        seek = (pts[first - 1] + pts[first]) / 2 if first > 0 else None
+        base = seek or 0.0
+        clip = (0, after - first, t_in - base, t_out - base) if seek is not None else (first, after, t_in, t_out)
+        return self._convert(j, s, clip=clip, name=name, src=src, seek=seek)
 
     def _retag(self, j, s, src):
         """Spotify songs: write Spotify's title/artist/album/year and album cover, and name the file after
@@ -889,7 +1352,7 @@ class Engine:
         if out.returncode != 0:
             j.log.append(out.stderr.strip()[-500:])
             return "error", "Couldn't write the song's tags: %s" % (out.stderr.strip().splitlines() or ["ffmpeg failed"])[-1]
-        named = os.path.join(work, song_filename(s, tags, os.path.basename(src)) + ext)
+        named = os.path.join(work, song_filename(s, tags, os.path.basename(src)) + _clip_suffix(j) + ext)
         os.replace(dst, named)
         if named != src:
             os.remove(src)
@@ -946,7 +1409,7 @@ class Engine:
         j.filepath, j.raw_file = final, ""
         return "ok", ""
 
-    def _ffmpeg(self, j, cmd, duration, label):
+    def _ffmpeg(self, j, cmd, duration, label, verb="Converting", span=(0, 100)):
         j.log.append("$ " + " ".join(shlex.quote(a) for a in cmd))
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -970,10 +1433,10 @@ class Engine:
             elif k == "progress":
                 with self.lock:
                     if duration:
-                        j.progress = round(min(99.9, 100 * pos / duration), 1)
+                        j.progress = round(min(99.9, span[0] + (span[1] - span[0]) * min(1, pos / duration)), 1)
                     if speed:
                         j.eta = max(0, (duration - pos) / speed) if duration else None
-                        j.stage = "Converting · %.1f× realtime" % speed
+                        j.stage = "%s · %.1f× realtime" % (verb, speed)
                     self._changed()
         proc.wait()
         t.join(timeout=5)
@@ -1044,7 +1507,8 @@ class Engine:
                     j.uploader = j.uploader or info.get("uploader") or ""
                     fid = info.get("format_id") or ""
                     j.parts = fid.count("+") + 1 if fid else 1
-                    j.total = _num(info.get("filesize_approx")) or _num(info.get("filesize")) or j.total
+                    if not j.is_clip():   # the whole video's size, not the part's
+                        j.total = _num(info.get("filesize_approx")) or _num(info.get("filesize")) or j.total
                     if info.get("height") and j.kind == "video":
                         j.quality = "%sp" % info["height"]
                     self._changed()
@@ -1206,6 +1670,133 @@ def _free_name(path):
     return path
 
 
+def _sound_at(start, length=None):
+    """ffmpeg audio filter: the sound from `start` (seconds into the file), as time 0, and `length` long.
+    A part's picture starts at a keyframe but its sound where it was asked to, so either can begin first:
+    what's missing is filled with silence rather than letting the sound slide out of sync."""
+    f = "asetpts=PTS-%.6f/TB,atrim=start=0%s,aresample=async=1:first_pts=0" % (start, ":end=%.6f" % length if length else "")
+    return f + (",apad=whole_dur=%.6f" % length if length else "")
+
+
+def _dur_text(sec):
+    sec = int(round(sec))
+    return "%d:%02d:%02d" % (sec // 3600, sec // 60 % 60, sec % 60) if sec >= 3600 else "%d:%02d" % (sec // 60, sec % 60)
+
+
+def _audio_end(src):
+    """Where a file's sound ends, in its own timestamps (read from the packets, which is quick)."""
+    try:
+        out = subprocess.run([str(tools.path("ffprobe")), "-v", "error", "-select_streams", "a:0", "-show_entries",
+                              "packet=pts_time,duration_time", "-of", "csv=p=0", src],
+                             capture_output=True, text=True, timeout=300).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return 0.0
+    end = 0.0
+    for line in out.splitlines():
+        try:
+            pts, _, dur = line.partition(",")
+            end = max(end, float(pts) + float(dur.strip(",") or 0))
+        except ValueError:
+            pass
+    return end
+
+
+def _clean_range(start, end, length):
+    """In and Out from the Edit tab: seconds, or None for the start / end of the file."""
+    try:
+        a = None if start is None else float(start)
+        b = None if end is None else float(end)
+    except (TypeError, ValueError):
+        raise RuntimeError("In and Out aren't times NooNoo understands")
+    if (a is not None and a < 0) or (a is not None and b is not None and b <= a) \
+            or (b is not None and length and b > float(length) + 0.5):
+        raise RuntimeError("Pick an In point before the Out point")
+    return a, b
+
+
+def _clean_clip(clip):
+    """{"start", "end", "fine"} from the Download Part window, checked."""
+    if not clip:
+        return None
+    try:
+        a, b = float(clip.get("start")), float(clip.get("end"))
+    except (TypeError, ValueError, AttributeError):
+        raise RuntimeError("The part's start and end aren't times NooNoo understands")
+    if a < 0 or b <= a:
+        raise RuntimeError("The part has to end after it starts")
+    return {"start": a, "end": b, "fine": bool(clip.get("fine", True))}
+
+
+def _tc(sec, fps=None):
+    """Timecode for a file name: HH.MM.SS.FF at a frame rate (non-drop), else HH.MM.SS.mmm."""
+    sec = max(0.0, sec)
+    if fps:
+        nominal = int(round(fps))
+        frames = int(round(sec * fps))
+        whole, ff = divmod(frames, nominal)
+        return "%02d.%02d.%02d.%02d" % (whole // 3600, whole // 60 % 60, whole % 60, ff)
+    ms = int(round(sec * 1000))
+    whole, ms = divmod(ms, 1000)
+    return "%02d.%02d.%02d.%03d" % (whole // 3600, whole // 60 % 60, whole % 60, ms)
+
+
+def _clip_label(first, last, fps=None):
+    """ [in-out] for a part's file name; with a frame rate, last is the last frame kept."""
+    return " [%s-%s]" % (_tc(first, fps), _tc(last, fps))
+
+
+HEIGHTS = (0, 2160, 1440, 1080, 720, 540, 480, 360, 240)
+FPS_CHOICES = ("source", "23.976", "24", "25", "29.97", "30", "50", "59.94", "60")
+
+
+def export_name(stem, label, j):
+    """An export's file name when none was typed: the source's, the timecode it covers, and what changed."""
+    desc = []
+    if j.height and j.kind == "video":
+        desc.append("%dp" % j.height)
+    if j.fps and j.fps != "source" and j.kind == "video":
+        desc.append("%s fps" % j.fps)
+    if j.target_mb:
+        desc.append("%g MB" % j.target_mb)
+    if not desc and not label:
+        desc.append(VIDEO_FORMATS[j.vformat]["label"].split(" (")[0].replace("MP4 · ", "") if j.kind == "video"
+                    else AUDIO_FORMATS.get(j.aformat, "audio"))
+    return stem + label + (" (%s)" % ", ".join(desc) if desc else "")
+
+
+def export_options(spec, s):
+    """What to export as, from the Edit tab, checked: kind, format, size, frame rate, file-size target."""
+    spec = spec or {}
+    kind = "audio" if spec.get("kind") == "audio" else "video"
+    out = {"kind": kind}
+    if kind == "video":
+        out["vformat"] = spec.get("vformat") if spec.get("vformat") in VIDEO_FORMATS else s["video_format"]
+    else:
+        out["aformat"] = spec.get("aformat") if spec.get("aformat") in AUDIO_FORMATS else s["audio_format"]
+    try:
+        out["height"] = int(spec.get("height") or 0)
+        out["target_mb"] = round(float(spec.get("target_mb") or 0), 2)
+    except (TypeError, ValueError):
+        raise RuntimeError("The size settings aren't numbers NooNoo understands")
+    if out["height"] not in HEIGHTS:
+        raise RuntimeError("Pick one of the listed picture sizes")
+    if not 0 <= out["target_mb"] <= 100000:
+        raise RuntimeError("Type a file size between 0.1 and 100,000 MB")
+    fps = str(spec.get("fps") or "source")
+    if fps not in FPS_CHOICES:
+        raise RuntimeError("Pick one of the listed frame rates")
+    out["fps"] = fps
+    if kind == "video" and out["target_mb"] and VIDEO_FORMATS[out["vformat"]].get("edit"):
+        raise RuntimeError("Editing formats like DNxHD and ProRes have a fixed quality, so they can't be made "
+                           "to fit a size. Pick H.264 or H.265")
+    out["filename"] = custom_filename(s, spec.get("filename"))
+    return out
+
+
+def _clip_suffix(j):
+    return getattr(j, "_clip_label", "") if j.is_clip() else ""
+
+
 def _archive(j):
     """Download archive per folder + format, so a new copy elsewhere (or as DNxHR) isn't 'already downloaded'."""
     key = hashlib.sha1(("%s|%s|%s" % (j.kind, j.vformat if j.kind == "video" else j.aformat, j.folder)).encode()).hexdigest()[:12]
@@ -1244,11 +1835,21 @@ def build_args(j, s, with_login=False):
         a += ["-r", s["rate_limit"]]
     if s["restrict_filenames"]:
         a.append("--restrict-filenames")
-    if s["skip_existing"] and not j.force and not j.filename:   # naming a copy means wanting that copy
+    clip = j.is_clip()
+    # naming a copy means wanting that copy; a part of a video doesn't make the whole one "downloaded"
+    if s["skip_existing"] and not j.force and not j.filename and not clip:
         a += ["--download-archive", _archive(j)]
+    if clip and not j._full:
+        # -copyts keeps the video's own timestamps, so every frame of the part says where it came from.
+        # Without it each stream is restarted from its own nearest keyframe, and an MKV part's picture,
+        # sound and position in the video no longer line up in any way NooNoo can tell.
+        a += ["--download-sections", "*%.3f-%.3f" % j.clip_bounds(), "--downloader-args", "ffmpeg:-copyts"]
 
     thumb_ok = True
-    if j.kind == "audio":
+    if j.kind == "audio" and clip:
+        a += ["-f", "ba/b"]   # kept as it comes: NooNoo cuts and encodes it once, in _cut_audio
+        thumb_ok = False
+    elif j.kind == "audio":
         fmt = j.aformat or s["audio_format"]
         a += ["-f", "ba/b", "-x", "--audio-quality", s["audio_quality"] or "0"]
         if fmt == "wav_avid":
@@ -1272,7 +1873,7 @@ def build_args(j, s, with_login=False):
         # skip YouTube's AI-upscaled "-sr" streams unless they're all there is
         a += ["-f", "bv*[format_id!*=-sr]+ba/b[format_id!*=-sr]/bv*+ba/b",
               "--merge-output-format", spec["merge"], "-S", ",".join(sort)]
-        edit = spec.get("edit")
+        edit = spec.get("edit") or clip   # subtitles and chapters would no longer line up with a part
         thumb_ok = not edit
         if s["subtitles"] and not edit:
             a += ["--write-subs", "--sub-langs", s["sub_langs"] or "en.*", "--embed-subs"]
@@ -1280,9 +1881,9 @@ def build_args(j, s, with_login=False):
             a.append("--embed-chapters")
     if s["embed_thumbnail"] and thumb_ok and not j.tags:   # Spotify songs get their album cover in _retag
         a += ["--embed-thumbnail", "--convert-thumbnails", "jpg"]
-    if s["embed_metadata"]:
+    if s["embed_metadata"] and not clip:   # it re-saves the file, losing the part's timestamps: tagged in the cut
         a.append("--embed-metadata")
-    if s["sponsorblock"]:
+    if s["sponsorblock"] and not clip:   # cutting sponsor bits out would move the frames the user picked
         a += ["--sponsorblock-remove", "sponsor,selfpromo,interaction"]
     # save() refuses these, but settings.json can be edited, or predate the allowlist.
     extra, refused = settings_mod.split_extra_args(s["extra_args"])

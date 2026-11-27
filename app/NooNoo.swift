@@ -6,6 +6,7 @@
 // When the app quits it closes the engine's stdin, which makes the engine pause downloads and exit.
 
 import Cocoa
+import UniformTypeIdentifiers
 import UserNotifications
 import WebKit
 
@@ -286,6 +287,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
             panel.beginSheetModal(for: w) { [weak self] result in
                 self?.reply(id, result == .OK ? panel.url?.path : nil)
             }
+        case "chooseFile":
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = false
+            panel.canChooseFiles = true
+            panel.allowsMultipleSelection = false
+            panel.allowedContentTypes = [.movie, .audio]
+            panel.prompt = "Add"
+            panel.message = "Add a video or sound file to the Edit tab:"
+            if let start = body["start"] as? String, !start.isEmpty {
+                panel.directoryURL = URL(fileURLWithPath: (start as NSString).expandingTildeInPath)
+            }
+            panel.beginSheetModal(for: w) { [weak self] result in
+                self?.reply(id, result == .OK ? panel.url?.path : nil)
+            }
         default:
             reply(id, nil)
         }
@@ -367,6 +382,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         let view = NSMenu(title: "View")
         view.addItem(item("Search", #selector(menuSearch)))
         view.addItem(item("Monitor", #selector(menuMonitor)))
+        view.addItem(item("Edit", #selector(menuEditTab)))
         add(view, to: main)
 
         let win = NSMenu(title: "Window")
@@ -394,6 +410,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     @objc func menuOptions() { callMenu("options") }
     @objc func menuSearch() { callMenu("search") }
     @objc func menuMonitor() { callMenu("monitor") }
+    @objc func menuEditTab() { callMenu("edit") }
     @objc func menuClose() { window?.close() }   // last window closed, so NooNoo quits (downloads pause)
     @objc func menuMinimize() { window?.miniaturize(nil) }
     @objc func menuZoom() { window?.zoom(nil) }

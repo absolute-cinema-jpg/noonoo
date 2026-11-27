@@ -400,6 +400,7 @@ const MENUS = {
   nav: () => [
     { label: "Search", key: "⌘1", run: () => showPage("search") },
     { label: "Monitor", key: "⌘2", run: () => showPage("monitor") },
+    { label: "Edit", key: "⌘3", run: () => showPage("edit") },
     "-",
     { label: "Close Search Tab", key: "⇧⌘W", run: () => S.active && closeSearch(S.active.id), disabled: !S.active },
   ],
@@ -537,10 +538,23 @@ function shortcutsHelp() {
 Enter          Download selected (audio with ⇧Enter)
 ⌫ / Delete     Junk results · remove downloads
 ⌘A             Select all
-⌘1 ⌘2          Search / Monitor
+⌘1 ⌘2 ⌘3       Search / Monitor / Edit
 ⌘W             Close window (quits NooNoo)
 ⇧⌘W            Close search tab
-⌘,             Options`, { icon: "info32" });
+⌘,             Options
+
+Edit tab
+Space          Play / pause
+J  K  L        Play backwards / stop / play forwards
+               (J or L again: 2×, 4×, 8×)
+K + J / K + L  One frame back / forward
+← →            One frame (⇧: 10 frames)
+I  O           Mark In / Mark Out (also E / R)
+Q  W           Go to In / Go to Out (also Home / End)
+G              Clear marks (whole clip)
+\\              Play In to Out
+-  =           Zoom the timeline out / in
+Enter          Export`, { icon: "info32" });
 }
 
 // ---------------------------------------------------------------- NooNoo.app bridge
@@ -564,7 +578,7 @@ function blink(host) {
 window.noonooBlink = (sel) => blink($(sel));
 // app menu bar items (NooNoo › About, Preferences...) call in here
 window.noonooMenu = (cmd) => ({ about, options: () => openOptions(), paste: pasteAndSearch, updates: () => checkUpdates(true),
-  search: () => showPage("search"), monitor: () => showPage("monitor") }[cmd] || (() => {}))();
+  search: () => showPage("search"), monitor: () => showPage("monitor"), edit: () => showPage("edit") }[cmd] || (() => {}))();
 function winAction(action) { return native(action); }
 $$("[data-win]").forEach((b) => b.addEventListener("click", () => winAction(b.dataset.win)));
 async function pickFolder(start) {
@@ -579,6 +593,14 @@ function showPage(p) {
   $$(".page").forEach((pg) => pg.classList.toggle("active", pg.id === "page-" + p));
   if (p === "monitor") { renderJobs(); $("#jobs-wrap").focus(); }
   if (p === "search") renderSearch();
+  if (p === "edit") {
+    fillExport();
+    refreshBin(true);
+    if (!ED.view) {
+      $("#bin-wrap").focus();
+      if (!ED.cur) viewerMsg("<b>Pick a clip on the left to trim it or export it again.</b><br>Every finished download is here. Add File... brings in anything else from your Mac.");
+    }
+  }
 }
 $$(".maintab").forEach((t) => t.addEventListener("click", () => showPage(t.dataset.page)));
 
@@ -593,7 +615,8 @@ function flash(msg, ms = 4000) {
 let searchSeq = 0;
 const VIDEO_Q = [["best", "Best available"], ["2160", "2160p (4K)"], ["1440", "1440p"], ["1080", "1080p"], ["720", "720p"], ["480", "480p"], ["360", "360p"]];
 const AUDIO_F = [["mp3", "MP3"], ["m4a", "M4A (AAC)"], ["opus", "Opus"], ["flac", "FLAC"], ["wav", "WAV"], ["wav_avid", "WAV 48k/24-bit (Avid)"], ["best", "Original"]];
-const FORMAT_GROUPS = [["Everyday", (k) => k === "h264"],
+const FORMAT_GROUPS = [["Everyday", (k) => k === "h264" || k === "hevc"],
+                       ["ProRes — Premiere, Resolve, Final Cut", (k) => k.startsWith("prores")],
                        ["Avid HD — 1920×1080", (k) => k.startsWith("dnxhd")],
                        ["Avid 4K & other sizes", (k) => k.startsWith("dnxhr")]];
 const FPS = [["source", "Match source"], ["23.976", "23.976 fps"], ["24", "24 fps"], ["25", "25 fps"], ["29.97", "29.97 fps"],
@@ -668,6 +691,7 @@ const results = new ListView($("#results-wrap"), "results", resultCols, {
     { label: "Download Audio Only", run: () => download(sel, "audio") },
     { label: "Download to Folder...", run: async () => { const f = await pickFolder(S.settings.output_dir); f && download(sel, "video", "", f); } },
     { label: "Download Audio to Folder...", run: async () => { const f = await pickFolder(S.settings.output_dir); f && download(sel, "audio", "", f); } },
+    { label: "Download Part...", run: focusPart },
     "-",
     ...VIDEO_Q.slice(1).map(([v, l]) => ({ label: "Download at " + l, run: () => download(sel, "video", v) })),
     "-",
@@ -907,9 +931,14 @@ function junk(sel) {
   renderSearch();
 }
 
-async function download(items, kind, quality, folder) {
+async function download(items, kind, quality, folder, clip) {
   items = items.filter(Boolean);
   if (!items.length) return;
+  const fromPanel = clip === undefined;
+  if (fromPanel) {   // Search › Part, bottom right
+    clip = panelPart(items);
+    if (clip === false) return;
+  }
   const q = kind === "video" ? (quality || S.settings.video_quality) : "";
   try {
     if (!folder && !(await commitSaveFolder())) {
@@ -922,16 +951,18 @@ async function download(items, kind, quality, folder) {
       items: items.map(({ url, title, site, uploader, thumbnail, duration, playlist, tags }, n) => ({ url, title, site, uploader, thumbnail, duration, playlist, tags, filename: names[n] })),
       kind, quality: q === "best" ? "" : q, folder: dest,
       vformat: S.settings.video_format, aformat: S.settings.audio_format,
-      fps: S.settings.edit_fps,
+      fps: S.settings.edit_fps, clip,
     });
     items.forEach((i) => (i._queued = true));
+    if (fromPanel && clip) clearPart();   // like the name: a part is for one download
     if (S.page === "search") results.render();
     nameBox.key = null;     // a name is for one download: don't reuse it if Download is pressed again
     updateSearchButtons();
     const wav = /^wav/.test(S.settings.audio_format);
     const fpsNote = S.settings.edit_fps !== "source" && (kind === "video" || wav) ? ` at ${S.settings.edit_fps} fps` : "";
     const as = (kind === "video" ? S.videoFormats[S.settings.video_format] : (AUDIO_F.find((a) => a[0] === S.settings.audio_format) || [, "audio"])[1]) + fpsNote;
-    flash(`Queued ${r.ids.length} download${r.ids.length === 1 ? "" : "s"} as ${as} → ${shortPath(dest)}`, 6000);
+    const part = clip ? ` (${fmtSecs(clip.start)}–${fmtSecs(clip.end)}${clip.fine ? ", to fine-trim in the Edit tab" : ""})` : "";
+    flash(`Queued ${r.ids.length} ${clip ? "part" : "download"}${r.ids.length === 1 ? "" : "s"}${part} as ${as} → ${shortPath(dest)}`, 6000);
     poll();
   } catch (e) {
     msgbox("Download", esc(e.message), { icon: "warn32" });
@@ -1023,10 +1054,696 @@ async function pasteAndSearch() {
   document.execCommand("paste");
 }
 
+// ================================================================= PARTS OF VIDEOS
+// Before downloading: a rough range, typed. After: the trim window, which plays a small copy of the
+// downloaded part (plus a couple of seconds either side) so the first and last frames can be picked exactly.
+function parseTime(v, fps = 30) {
+  v = String(v ?? "").trim().replace(/;/g, ":");
+  if (!v) return null;
+  if (!/^\d+(\.\d+)?$|^\d+(:\d{1,2}(\.\d+)?){1,3}$/.test(v)) return NaN;
+  const p = v.split(":");
+  const ff = p.length === 4 ? +p.pop() : 0;        // HH:MM:SS:FF timecode
+  return p.reduce((t, x) => t * 60 + parseFloat(x), 0) + ff / fps;
+}
+function fmtSecs(t, ms) {      // 0:30, 1:02:03 (ms: 0:30.250)
+  const neg = t < 0;
+  t = Math.abs(t);
+  const whole = ms ? Math.floor(t + 1e-6) : Math.round(t);
+  const h = Math.floor(whole / 3600), m = Math.floor((whole % 3600) / 60), x = whole % 60;
+  const frac = ms ? "." + String(Math.round((t - whole) * 1000)).padStart(3, "0") : "";
+  return (neg ? "-" : "") + (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(x).padStart(2, "0") + frac;
+}
+function fmtTC(frames, fps) {  // HH:MM:SS:FF, non-drop, at the nominal rate
+  const nom = Math.round(fps), neg = frames < 0;
+  frames = Math.abs(frames);
+  const ff = frames % nom, whole = Math.floor(frames / nom);
+  const two = (n) => String(n).padStart(2, "0");
+  return (neg ? "-" : "") + [Math.floor(whole / 3600), Math.floor(whole / 60) % 60, whole % 60, ff].map(two).join(":");
+}
+const rate = (r) => { const [n, d] = String(r || "").split("/").map(Number); return n && (d || 1) ? n / (d || 1) : 0; };
+
+// Search › Part: a rough range typed before downloading. Empty = the whole thing.
+function panelPart(items) {
+  const fv = $("#quick-from").value.trim(), tv = $("#quick-to").value.trim();
+  if (!fv && !tv) return null;
+  const bad = (m) => { msgbox("Part", esc(m), { icon: "warn32" }); return false; };
+  const a = fv ? parseTime(fv) : 0, b0 = tv ? parseTime(tv) : null;
+  if (isNaN(a) || (b0 !== null && isNaN(b0))) return bad("NooNoo couldn't read the Part times. Try 30.5, 0:30, 1:02:03 or 00:00:30:12.");
+  const lens = items.map((i) => i.duration).filter(Boolean);
+  const len = lens.length === items.length && lens.length ? Math.min(...lens) : null;
+  let b = b0;
+  if (b === null) {
+    if (!len) return bad("Type where the part ends too: NooNoo doesn't know how long this is.");
+    b = len;
+  }
+  if (b <= a) return bad("The part has to end after it starts.");
+  if (len && a >= len) return bad(`${items.length > 1 ? "The shortest one" : "This one"} is only ${fmt.dur(len)} long.`);
+  return { start: a, end: len ? Math.min(b, len) : b, fine: $("#quick-fine").checked };
+}
+function markPart() {
+  const on = !!($("#quick-from").value.trim() || $("#quick-to").value.trim());
+  $(".part-range").classList.toggle("on", on);
+}
+function clearPart() {
+  $("#quick-from").value = $("#quick-to").value = "";
+  markPart();
+}
+function focusPart() {
+  showPage("search");
+  $("#quick-from").focus();
+  $("#quick-from").select();
+  flash("Type where the part starts and ends (Part, bottom right), then press Download or Download Audio.", 8000);
+}
+$("#quick-fine").checked = store.get("partFine", true);
+$("#quick-fine").addEventListener("change", (e) => store.set("partFine", e.target.checked));
+["#quick-from", "#quick-to"].forEach((s) => {
+  $(s).addEventListener("input", markPart);
+  $(s).addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { clearPart(); e.target.blur(); }
+    if (e.key === "Enter") { e.preventDefault(); const sel = results.selected(); if (sel.length) download(sel, "video"); }
+  });
+});
+
+function partText(j) {   // what a part's job keeps: the frames picked, else the range typed
+  if (j.trim_end != null && j.clip_fps) {
+    const fps = rate(j.clip_fps), base = Math.round(j.clip_offset * fps);
+    const a = Math.round(j.trim_start * fps), b = Math.round(j.trim_end * fps) - 1;
+    return `${fmtTC(base + a, fps)} to ${fmtTC(base + b, fps)} (${b - a + 1} frames)`;
+  }
+  if (j.trim_end != null) return `${fmtSecs(j.clip_offset + j.trim_start, true)} to ${fmtSecs(j.clip_offset + j.trim_end, true)}`;
+  return `${fmtSecs(j.clip_start, true)} to ${fmtSecs(j.clip_end, true)}${j.fine_trim ? ", to be fine-trimmed" : ""}`;
+}
+
+// ================================================================= EDIT
+// Every finished download, and any file added by hand, can be trimmed and exported again here. The viewer
+// plays a small copy in which frame n is at exactly n / fps, so the frames picked are the frames exported.
+// Exports are always made from the original file.
+const ED = { items: [], cur: null, view: null, listAt: 0, seq: 0, selT: null };
+const HEIGHTS = [[0, "Same as source"], [2160, "2160p (4K)"], [1440, "1440p"], [1080, "1080p"], [720, "720p"], [540, "540p"],
+                 [480, "480p"], [360, "360p"], [240, "240p"]];
+const FIT_OK = new Set(["v:h264", "v:hevc", "a:mp3", "a:m4a", "a:opus"]);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const FROM_LABEL = { part: "Part, ready to trim", download: "Download", export: "Export", file: "Added file" };
+
+const binCols = [
+  { key: "kind", label: "", w: 24, cls: "c-icon", render: (it) => icon(it.kind === "audio" ? "fileAudio" : "fileVideo"), title: "File Icon" },
+  { key: "name", label: "Name", w: null, fixed: true, render: (it) =>
+      `${it.from === "part" ? `<span class="status-pill st-trim"><span class="status-dot"></span></span>` : ""}<span class="${it.missing ? "muted" : ""}">${esc(it.name)}</span>` },
+  { key: "duration", label: "Length", w: 52, cls: "num", render: (it) => esc(fmt.dur(it.duration)) },
+];
+const binView = new ListView($("#bin-wrap"), "bin", binCols, {
+  id: (it) => it.key,
+  empty: "Finished downloads show up here. Add File... brings in anything else.",
+  onSel: (sel) => {
+    clearTimeout(ED.selT);
+    ED.selT = setTimeout(() => sel.length === 1 && openClip(sel[0]), 180);   // arrowing past a clip doesn't open it
+    updateEditButtons();
+  },
+  onDbl: (it) => it && openClip(it),
+  onDelete: (sel) => removeClips(sel),
+  tooltip: (it) => it && `<div class="tt"><div><div class="tt-t">${esc(it.name)}</div><div class="tt-m">${esc(FROM_LABEL[it.from] || "")}${it.duration ? " · " + esc(fmt.dur(it.duration)) : ""}</div>${it.path ? `<div class="tt-m">${esc(shortPath(it.path))}</div>` : ""}${it.missing ? `<div class="tt-m">Not there any more (moved or deleted?)</div>` : ""}</div></div>`,
+  onContext: (e, sel) => Menu.show(e.clientX, e.clientY, [
+    { label: "Open", run: () => openClip(sel[0]), disabled: sel.length !== 1 },
+    { label: "Explore", run: () => reveal(sel[0].path), disabled: !(sel.length === 1 && sel[0].path && !sel[0].missing) },
+    "-",
+    { label: "Add File...", run: addClipFile },
+    { label: "Remove From List", key: "⌫", run: () => removeClips(sel), disabled: sel.every((it) => it.from === "part") },
+  ]),
+});
+const reveal = (p) => api("/api/open", { what: "reveal", path: p }).catch((x) => flash(x.message));
+
+async function refreshBin(force) {
+  if (!force && Date.now() - ED.listAt < 1200) return;
+  ED.listAt = Date.now();
+  let d;
+  try { d = await api("/api/edit/list"); } catch { return; }
+  ED.items = d.items;
+  binView.setItems(ED.items);
+  if (ED.cur && !ED.items.some((i) => i.key === ED.cur.key)) {   // exported (a part), or taken off the list
+    const was = ED.cur;
+    closeViewer();
+    viewerMsg(was.from === "part" ? `<b>Exporting ${esc(was.name)}.</b><br>Monitor shows how it's going; the finished file appears in this list.`
+      : "Pick a clip on the left.");
+  }
+  updateEditButtons();
+}
+async function addClipFile() {
+  let path = NATIVE ? await native("chooseFile", { start: S.settings.output_dir })
+    : (await api("/api/choose-file", { start: S.settings.output_dir }).catch((e) => (flash(e.message), {}))).path;
+  if (!path) return;
+  try {
+    const r = await api("/api/edit/add", { path });
+    await refreshBin(true);
+    const it = ED.items.find((i) => i.key === r.key);
+    if (it) { binView.select([it.key]); openClip(it); }
+  } catch (e) {
+    msgbox("Add File", esc(e.message), { icon: "warn32" });
+  }
+}
+$("#bin-add").addEventListener("click", addClipFile);
+async function removeClips(sel) {
+  sel = sel.filter((it) => it.from !== "part");
+  if (!sel.length) return;
+  for (const it of sel) {
+    if (ED.cur && ED.cur.key === it.key) { closeViewer(); viewerMsg("Pick a clip on the left."); }
+    await api("/api/edit/remove", { sid: it.sid }).catch((e) => flash(e.message));
+  }
+  flash(`Took ${sel.length === 1 ? esc(sel[0].name) : sel.length + " clips"} off the list. The file${sel.length === 1 ? " stays" : "s stay"} where ${sel.length === 1 ? "it is" : "they are"}.`);
+  refreshBin(true);
+}
+
+// Open in the Edit tab: from Monitor (a part waiting to be trimmed, or any finished download).
+async function openInEdit(j) {
+  showPage("edit");
+  await refreshBin(true);
+  const it = ED.items.find((i) => (j.status === "trim" ? i.job === j.id && i.from === "part" : i.path === j.filepath))
+    || ED.items.find((i) => i.job === j.id);
+  if (!it) return flash("That file isn't there any more (moved or deleted?)");
+  binView.select([it.key]);
+  openClip(it);
+}
+
+function viewerMsg(html, extra) {
+  const v = $("#ed-viewer");
+  v.innerHTML = `<div class="empty-state ed-empty"><div data-icon="edit24"></div><p>${html}</p>${extra || ""}</div>`;
+  paintIcons(v);
+}
+function closeViewer() {
+  if (ED.view) ED.view.destroy();
+  ED.view = null;
+  ED.cur = null;
+  ED.seq++;
+  $("#ed-title").textContent = "Edit";
+  $("#ed-sub").textContent = "";
+  updateEditButtons();
+}
+async function openClip(it) {
+  if (!it || (ED.cur && ED.cur.key === it.key)) return;
+  closeViewer();
+  const seq = ED.seq;
+  ED.cur = it;
+  $("#ed-title").textContent = it.name;
+  $("#ed-sub").textContent = "— " + (FROM_LABEL[it.from] || "");
+  if (it.from === "part") {
+    const j = S.jobs.find((x) => x.id === it.job);
+    if (j) mountViewer(partSource(j));
+    return;
+  }
+  if (it.missing) return viewerMsg(`<b>${esc(it.name)}</b> isn't there any more (moved or deleted?).`);
+  let st;
+  try { st = await api("/api/edit/open", { sid: it.sid }); } catch (e) { return seq === ED.seq && viewerMsg(esc(e.message)); }
+  while (st.state !== "ready") {
+    if (seq !== ED.seq) return;
+    if (st.state === "error") {
+      viewerMsg(`<b>NooNoo can't edit this file.</b><br>${esc(st.error)}`, `<button class="xp-btn" id="ed-again">Try Again</button>`);
+      $("#ed-again").onclick = () => { ED.cur = null; openClip(it); };
+      return;
+    }
+    const pct = Math.floor(st.progress || 0);
+    const box = $("#ed-viewer .ed-prep");
+    if (box) { $("i", box).style.width = pct + "%"; $(".pct", box).textContent = pct + "%"; }
+    else viewerMsg(`<b>Getting ${esc(it.name)} ready to edit...</b><br>NooNoo measures every frame once and makes a small copy to play. Long or 4K videos take a little while.`,
+      `<div class="xp-progress ed-prep"><i style="width:${pct}%"></i><span class="pct">${pct}%</span></div>`);
+    await sleep(500);
+    try { st = await api("/api/edit/state?sid=" + it.sid); } catch {}
+  }
+  if (seq !== ED.seq) return;
+  it.duration = st.len;
+  mountViewer(fileSource(it, st));
+}
+
+// What the viewer needs, for a part waiting to be trimmed or for a measured file
+function partSource(j) {
+  const isVideo = !!j.clip_fps, fps = isVideo ? rate(j.clip_fps) : 0, N = j.clip_frames || 0;
+  const len = isVideo ? N / fps : (j.clip_len || 0), last = isVideo ? N - 1 : len;
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const inP = isVideo ? clamp(Math.round((j.clip_start - j.clip_offset) * fps), 0, last) : clamp(j.clip_start - j.clip_offset, 0, len);
+  const outP = isVideo ? clamp(Math.round((j.clip_end - j.clip_offset) * fps) - 1, inP, last) : clamp(j.clip_end - j.clip_offset, inP, len);
+  return { part: j, title: j.title, isVideo, fps, N, len, base: j.clip_offset, inP, outP,
+           url: (what) => `/api/clip?id=${j.id}&what=${what}&t=${encodeURIComponent(window.TOKEN)}`, wave: true,
+           kind: j.kind, width: 0, height: 0 };
+}
+function fileSource(it, st) {
+  const isVideo = st.kind === "video", fps = isVideo ? rate(st.fps) : 0, N = st.frames || 0;
+  const len = isVideo ? N / fps : (st.len || 0);
+  return { it, sid: st.sid, title: it.name, isVideo, fps, N, len, base: st.tc0 || 0, inP: 0, outP: isVideo ? N - 1 : len,
+           url: (what) => `/api/edit/media?sid=${st.sid}&what=${what}&t=${encodeURIComponent(window.TOKEN)}`, wave: !!st.wave,
+           kind: st.kind, width: st.width, height: st.height, hasAudio: st.has_audio, path: st.path };
+}
+
+function mountViewer(src) {
+  const v = $("#ed-viewer");
+  const { isVideo, fps, N, len } = src;
+  const step = isVideo ? 1 : 0.01;                                  // a frame, or 10 ms of sound
+  const last = isVideo ? Math.max(0, N - 1) : len;
+  const total = isVideo ? Math.max(1, N) : Math.max(0.001, len);    // timeline length in positions
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const baseF = isVideo ? Math.round(src.base * fps) : 0;          // timecode of the clip's first frame
+  const showPos = (p) => isVideo ? fmtTC(baseF + p, fps) : fmtSecs(src.base + p, true);
+  let inP = src.inP, outP = src.outP, cur = inP, stopAt = null;
+  let zoom = 1, v0 = 0;                // visible stretch of the timeline: v0 .. v0 + total / zoom
+  let shuttle = 0, shuttleT = null;    // J/L: negative = backwards; shuttleT = reverse-play timer
+  let kDown = false, seeking = false, holdView = false;
+
+  v.innerHTML = `
+    <div class="trim-form ed-form${isVideo ? "" : " audio"}">
+      ${isVideo ? `<div class="ed-screen"><video class="tw-video" preload="auto" playsinline></video></div>` : `<audio class="tw-audio" preload="auto"></audio>`}
+      <div class="tw-timeline">${src.wave ? `<img class="tw-wave" alt="">` : ""}<div class="tw-range"></div><div class="tw-head"></div></div>
+      <div class="tw-ruler"><span class="r0"></span><span class="r1"></span><span class="r2"></span></div>
+      <div class="tw-bar">
+        <button class="xp-btn tw-b" data-a="toIn" title="Go to In (Q or Home)">|◀</button>
+        <button class="xp-btn tw-b" data-a="back10" title="Back ${isVideo ? "10 frames" : "0.1 s"} (Shift+←)">◀◀</button>
+        <button class="xp-btn tw-b" data-a="back" title="Back ${isVideo ? "1 frame" : "10 ms"} (←)">◀</button>
+        <button class="xp-btn tw-b tw-play" data-a="play" title="Play / Pause (Space). J plays backwards, K stops, L plays forwards: press again to go faster">▶</button>
+        <button class="xp-btn tw-b" data-a="fwd" title="Forward ${isVideo ? "1 frame" : "10 ms"} (→)">▶</button>
+        <button class="xp-btn tw-b" data-a="fwd10" title="Forward ${isVideo ? "10 frames" : "0.1 s"} (Shift+→)">▶▶</button>
+        <button class="xp-btn tw-b" data-a="toOut" title="Go to Out (W or End)">▶|</button>
+        <span class="tw-speed"></span>
+        <input class="tw-now" spellcheck="false" title="Type a ${isVideo ? "timecode" : "time"} and press Enter to go there">
+        <button class="xp-btn tw-z" data-a="zoomOut" title="Zoom out (-)">−</button>
+        <button class="xp-btn tw-z" data-a="zoomIn" title="Zoom in (=)">+</button>
+        <button class="xp-btn" data-a="markIn" title="Mark In (I)">Mark In</button>
+        <button class="xp-btn" data-a="markOut" title="Mark Out (O)">Mark Out</button>
+      </div>
+      <div class="tw-marks">
+        <div class="tw-mark">${isVideo ? `<canvas class="tw-still" data-m="in" width="160" height="90"></canvas>` : ""}<div><b>In</b> <span class="tw-in"></span></div></div>
+        <div class="tw-mark">${isVideo ? `<canvas class="tw-still" data-m="out" width="160" height="90"></canvas>` : ""}<div><b>Out</b> <span class="tw-out"></span></div></div>
+        <div class="tw-mark tw-dur"><div><b>Length</b> <span class="tw-len"></span></div>
+          <div class="ed-est"></div>
+          <div class="pf-hint">${isVideo ? `The Out frame is included. ${esc(String(Math.round(fps * 1000) / 1000))} fps${src.width ? `, ${src.width}×${src.height}` : ""}.` : "Times are where the sound starts and stops."}
+Space plays. J K L: back, stop, forward (again: faster). ←/→ step, Shift steps 10. I/O mark, G clears.</div></div>
+      </div>
+    </div>`;
+  const form = $(".ed-form", v);
+  const media = $(isVideo ? "video" : "audio", v);
+  const tl = $(".tw-timeline", v), wave = $(".tw-wave", v), now = $(".tw-now", v);
+  if (wave) { wave.onerror = () => wave.remove(); wave.src = src.url("wave"); }
+  media.src = src.url(isVideo ? "video" : "audio");
+  media.onerror = () => viewerMsg(src.part ? "NooNoo couldn't play the downloaded part. Press Retry on it in Monitor to download it again."
+    : "NooNoo couldn't play its copy of this file. Remove it from the list and add it again.");
+
+  const timeOf = (p) => isVideo ? (p + 0.1) / fps : p;   // a tenth of a frame in, so the right frame shows
+  const posOf = (t) => isVideo ? clamp(Math.round(t * fps - 0.1), 0, last) : clamp(t, 0, len);
+  const span = () => total / zoom;
+  const pct = (p) => 100 * (p - v0) / span();
+  function fitView() {   // keep the playhead in sight while zoomed
+    if (zoom === 1) { v0 = 0; return; }
+    if (holdView) return;
+    const w = span();
+    if (cur < v0 || cur > v0 + w * 0.95) v0 = clamp(cur - w * 0.1, 0, total - w);
+  }
+  function paint() {
+    fitView();
+    if (document.activeElement !== now) now.value = showPos(cur);
+    $(".tw-in", v).textContent = showPos(inP);
+    $(".tw-out", v).textContent = showPos(outP);
+    const n = isVideo ? outP - inP + 1 : outP - inP;
+    $(".tw-len", v).textContent = isVideo ? `${fmtTC(n, fps)} (${n} frames)` : fmtSecs(n, true);
+    const r = $(".tw-range", v);
+    r.style.left = pct(inP) + "%";
+    r.style.width = Math.max(0.2, pct(outP + (isVideo ? 1 : 0)) - pct(inP)) + "%";
+    $(".tw-head", v).style.left = pct(cur + (isVideo ? 0.5 : 0)) + "%";
+    if (wave) { wave.style.width = 100 * zoom + "%"; wave.style.left = -100 * zoom * v0 / total + "%"; }
+    const rp = (p) => isVideo ? fmtTC(baseF + Math.round(p), fps) : fmtSecs(src.base + p, true);
+    $(".r0", v).textContent = rp(v0);
+    $(".r1", v).textContent = zoom > 1 ? `${rp(v0 + span() / 2)} · zoom ${zoom}×` : rp(v0 + span() / 2);
+    $(".r2", v).textContent = rp(Math.min(total, v0 + span()) - (isVideo ? 1 : 0));
+    $(".tw-play", v).textContent = media.paused && !shuttleT ? "▶" : "❚❚";
+    $(".tw-speed", v).textContent = shuttle ? (shuttle < 0 ? "◀ " : "▶ ") + Math.abs(shuttle) + "×" : "";
+    updateEstimate();
+  }
+  const still = (which) => {
+    if (!isVideo || !media.videoWidth) return;
+    const c = $(`canvas[data-m="${which}"]`, v);
+    c.getContext("2d").drawImage(media, 0, 0, c.width, c.height);
+  };
+  // Seek, then wait for that frame to be on screen (so a still can be taken of it).
+  function seek(p) {
+    cur = isVideo ? clamp(Math.round(p), 0, last) : clamp(p, 0, len);
+    paint();
+    return new Promise((res) => {
+      let done = false;
+      const fin = () => { if (!done) { done = true; seeking = false; res(); } };
+      seeking = true;
+      media.addEventListener("seeked", () => {
+        if (isVideo && media.requestVideoFrameCallback) {
+          media.requestVideoFrameCallback(() => requestAnimationFrame(fin));
+          setTimeout(fin, 400);   // a paused video that was already showing this frame may not call back
+        } else fin();
+      }, { once: true });
+      media.currentTime = timeOf(cur);
+    });
+  }
+  // While playing, follow the frame actually on screen.
+  let alive = true;
+  if (isVideo && media.requestVideoFrameCallback) {
+    const follow = (t, md) => {
+      if (!alive) return;
+      if (!media.paused) {
+        cur = posOf(md.mediaTime);
+        if (stopAt != null && cur >= stopAt) { stopPlay(); stopAt = null; seek(outP); }
+        paint();
+      }
+      media.requestVideoFrameCallback(follow);
+    };
+    media.requestVideoFrameCallback(follow);
+  } else {
+    const tick = () => {
+      if (!alive) return;
+      if (!media.paused) {
+        cur = posOf(media.currentTime);
+        if (stopAt != null && cur >= stopAt) { stopPlay(); stopAt = null; seek(outP); }
+        paint();
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+  media.addEventListener("pause", () => { if (shuttleT) return; if (isVideo) seek(cur); else paint(); });
+  media.addEventListener("play", paint);
+  media.addEventListener("ended", () => { shuttle = 0; paint(); });
+
+  // J / K / L. Forwards plays faster; backwards (which a video element can't do) steps through frames
+  // on a timer, as fast as the small copy can show them.
+  function stopPlay() {
+    shuttle = 0;
+    if (shuttleT) { clearInterval(shuttleT); shuttleT = null; media.muted = false; }
+    if (!media.paused) media.pause();
+    else if (isVideo) seek(cur);
+    media.playbackRate = 1;
+    paint();
+  }
+  function forward(speed) {
+    if (shuttleT) { clearInterval(shuttleT); shuttleT = null; media.muted = false; }
+    shuttle = speed;
+    stopAt = null;
+    media.playbackRate = speed;
+    if (cur >= last) seek(0).then(() => media.play()); else media.play();
+    paint();
+  }
+  function backward(speed) {
+    if (!media.paused) media.pause();
+    if (shuttleT) clearInterval(shuttleT);
+    shuttle = -speed;
+    media.muted = true;
+    let t0 = performance.now(), p0 = cur;
+    shuttleT = setInterval(() => {
+      if (seeking) return;
+      const p = p0 - (performance.now() - t0) / 1000 * speed * (isVideo ? fps : 1);
+      if (p <= 0) { seek(0); stopPlay(); return; }
+      if ((isVideo ? Math.round(p) : p) !== cur) seek(p);
+    }, 15);
+    paint();
+  }
+  const faster = (s) => Math.min(8, s * 2);
+
+  const act = {
+    play: () => { if (!media.paused || shuttleT) stopPlay(); else forward(1); },
+    J: () => backward(shuttle < 0 ? faster(-shuttle) : 1),
+    K: () => stopPlay(),
+    L: () => forward(shuttle > 0 ? faster(shuttle) : 1),
+    back: () => { stopPlay(); seek(cur - step); },
+    fwd: () => { stopPlay(); seek(cur + step); },
+    back10: () => { stopPlay(); seek(cur - step * 10); },
+    fwd10: () => { stopPlay(); seek(cur + step * 10); },
+    toIn: () => { stopPlay(); seek(inP); },
+    toOut: () => { stopPlay(); seek(outP); },
+    toStart: () => { stopPlay(); seek(0); },
+    toEnd: () => { stopPlay(); seek(last); },
+    // marking In after Out (or Out before In) clears the other mark, as in Avid
+    markIn: () => { inP = cur; still("in"); if (outP < inP) { outP = last; refreshStills(); } paint(); },
+    markOut: () => { outP = cur; still("out"); if (inP > outP) { inP = 0; refreshStills(); } paint(); },
+    clear: () => { inP = 0; outP = last; refreshStills(); paint(); },
+    playRange: () => { stopPlay(); seek(inP).then(() => { forward(1); stopAt = outP; }); },
+    zoomIn: () => setZoom(zoom * 2),
+    zoomOut: () => setZoom(zoom / 2),
+  };
+  function setZoom(z, at) {
+    const maxZ = Math.max(1, Math.pow(2, Math.ceil(Math.log2(total / (isVideo ? 60 : 1)))));   // down to ~60 frames / 1 s
+    z = clamp(Math.round(z), 1, maxZ);
+    const anchor = at ?? cur, f = (anchor - v0) / span();
+    zoom = z;
+    v0 = zoom === 1 ? 0 : clamp(anchor - f * span(), 0, total - span());
+    paint();
+  }
+  async function refreshStills() {
+    if (!isVideo) return;
+    const keep = cur;
+    await seek(outP); still("out");
+    await seek(inP); still("in");
+    if (keep !== inP) await seek(keep);
+  }
+  $$("[data-a]", v).forEach((b) => (b.onclick = () => { act[b.dataset.a](); form.focus(); }));
+  now.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Escape") { now.value = showPos(cur); now.blur(); }
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const t = parseTime(now.value, fps || 30);
+    if (t == null || isNaN(t)) { flash("Type a time like 1:02 or a timecode like 00:01:02:12"); return; }
+    stopPlay();
+    seek(isVideo ? Math.round(t * fps) - baseF : t - src.base);
+    now.blur();
+  });
+  now.addEventListener("blur", () => (now.value = showPos(cur)));
+  form.tabIndex = 0;
+  function onKey(e) {
+    if (S.page !== "edit" || $("#dialogs").children.length) return;
+    const el = e.target instanceof Element ? e.target : document.body;
+    if (el.matches("input, select, textarea")) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const inList = !!el.closest("#bin-wrap");
+    if (inList && ["ArrowUp", "ArrowDown", "Enter", "Delete", "Backspace", "Home", "End"].includes(e.key)) return;
+    const k = e.key.length === 1 ? e.key.toLowerCase() : e.key, sh = e.shiftKey;
+    if (k === "k") kDown = true;
+    let a = null;
+    if (kDown && (k === "j" || k === "l")) a = k === "j" ? "back" : "fwd";   // hold K, tap J / L: one frame
+    else a = { " ": "play", j: "J", k: "K", l: "L", ArrowLeft: sh ? "back10" : "back", ArrowRight: sh ? "fwd10" : "fwd",
+               i: "markIn", e: "markIn", o: "markOut", r: "markOut", q: "toIn", w: "toOut", Home: "toIn", End: "toOut",
+               g: "clear", "\\": "playRange", "-": "zoomOut", "=": "zoomIn", "+": "zoomIn" }[k] || null;
+    if (k === "Enter") { e.preventDefault(); return exportNow(); }
+    if (a) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (el.matches("button")) el.blur();   // so Space doesn't also press the button
+      if (!(k === "k" && e.repeat)) act[a]();
+    }
+  }
+  const onKeyUp = (e) => { if (e.key.toLowerCase() === "k") kDown = false; };
+  document.addEventListener("keydown", onKey);
+  document.addEventListener("keyup", onKeyUp);
+  // scrub on the timeline; the wheel zooms (and scrolls sideways when zoomed)
+  const posAt = (ev) => { const r = tl.getBoundingClientRect(); return v0 + clamp((ev.clientX - r.left) / r.width, 0, 1) * span(); };
+  tl.addEventListener("mousedown", (e) => {
+    stopPlay();
+    const to = (ev) => seek(isVideo ? Math.floor(posAt(ev)) : posAt(ev));
+    to(e);
+    const up = () => { document.removeEventListener("mousemove", to); document.removeEventListener("mouseup", up); form.focus(); };
+    document.addEventListener("mousemove", to);
+    document.addEventListener("mouseup", up);
+  });
+  tl.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.shiftKey) {
+      if (zoom > 1) { v0 = clamp(v0 + (e.deltaX || e.deltaY) / tl.clientWidth * span(), 0, total - span()); paintNoFit(); }
+    } else if (Math.abs(e.deltaY) > 2) setZoom(e.deltaY < 0 ? zoom * 2 : zoom / 2, posAt(e));
+  }, { passive: false });
+  function paintNoFit() { holdView = true; paint(); holdView = false; }
+  // once it can play: take stills of In and Out, then wait at In
+  media.addEventListener("loadeddata", async () => { await refreshStills(); paint(); }, { once: true });
+  paint();
+  setTimeout(() => form.focus(), 80);
+
+  ED.view = {
+    src,
+    marks: () => ({ inP, outP, whole: inP === 0 && outP === last }),
+    range: () => isVideo ? { start: inP / fps, end: (outP + 1) / fps } : { start: inP, end: outP },
+    seconds: () => isVideo ? (outP - inP + 1) / fps : outP - inP,
+    label: () => {   // the timecode the export covers, as the engine names it
+      const tc = (sec) => { const p = (x) => String(x).padStart(2, "0"); if (isVideo) { const f = Math.round(sec * fps), nom = Math.round(fps), w = Math.floor(f / nom); return [Math.floor(w / 3600), Math.floor(w / 60) % 60, w % 60, f % nom].map(p).join("."); } const ms = Math.round(sec * 1000), w = Math.floor(ms / 1000); return [Math.floor(w / 3600), Math.floor(w / 60) % 60, w % 60].map(p).join(".") + "." + String(ms % 1000).padStart(3, "0"); };
+      return isVideo ? ` [${tc(src.base + inP / fps)}-${tc(src.base + outP / fps)}]` : ` [${tc(src.base + inP)}-${tc(src.base + outP)}]`;
+    },
+    playRange: () => act.playRange(),
+    clear: () => act.clear(),
+    destroy: () => {
+      alive = false;
+      if (shuttleT) clearInterval(shuttleT);
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("keyup", onKeyUp);
+      media.pause(); media.removeAttribute("src"); media.load();
+    },
+  };
+  fillExport();
+  updateEditButtons();
+}
+
+// ---- the export panel (bottom right of Edit)
+function exportChoice() {
+  const [k, f] = ($("#ex-format").value || "v:h264").split(":");
+  return { kind: k === "a" ? "audio" : "video", vformat: k === "v" ? f : "", aformat: k === "a" ? f : "", key: $("#ex-format").value };
+}
+function fillExport() {
+  const vw = ED.view, src = vw && vw.src;
+  const saved = store.get("exportAs", "v:" + (S.settings.video_format || "h264"));
+  const fmtSel = $("#ex-format");
+  const vids = FORMAT_GROUPS.map(([label, test]) => `<optgroup label="${esc(label)}">${Object.keys(S.videoFormats).filter(test)
+    .map((k) => `<option value="v:${k}">${esc(S.videoFormats[k])}</option>`).join("")}</optgroup>`).join("");
+  const auds = `<optgroup label="Sound only">${AUDIO_F.map(([v, l]) => `<option value="a:${v}">${esc(l)}</option>`).join("")}</optgroup>`;
+  let want = fmtSel.value || saved;
+  if (src && src.part) want = src.part.kind === "audio" ? "a:" + src.part.aformat : "v:" + src.part.vformat;   // as it was downloaded
+  if (src && !src.isVideo && want.startsWith("v:")) want = "a:" + S.settings.audio_format;
+  fmtSel.innerHTML = (src && !src.isVideo ? "" : vids) + auds;
+  fmtSel.value = want;
+  if (!fmtSel.value) fmtSel.selectedIndex = 0;
+  if (!$("#ex-height").options.length) {
+    $("#ex-height").innerHTML = HEIGHTS.map(([v, l]) => `<option value="${v}">${l}</option>`).join("");
+    $("#ex-height").value = store.get("exportHeight", 0);
+    $("#ex-fps").innerHTML = FPS.map(([v, l]) => `<option value="${v}">${l}</option>`).join("");
+    $("#ex-fps").value = store.get("exportFps", "source");
+    $("#ex-fit").checked = store.get("exportFit", false);
+    $("#ex-mb").value = store.get("exportMB", "25");
+  }
+  const box = $("#ex-folder");
+  if (document.activeElement !== box && !box.classList.contains("bad")) {
+    box.value = store.get("exportFolder", "") || S.settings.output_dir;
+    showPathEnd(box);
+  }
+  syncExport();
+}
+function syncExport() {
+  const c = exportChoice(), vw = ED.view;
+  const dnx = c.vformat.startsWith("dnxhd");
+  $("#ex-height").disabled = c.kind !== "video" || dnx;
+  $("#ex-height").title = dnx ? "DNxHD is always 1920×1080" : "Picture size: the short side, so vertical video stays vertical";
+  $("#ex-fps").disabled = !(c.kind === "video" || /^wav/.test(c.aformat));
+  const fitOk = FIT_OK.has(c.key);
+  $("#ex-fit").disabled = !fitOk;
+  $("#ex-mb").disabled = !fitOk || !$("#ex-fit").checked;
+  $(".fit-size").title = fitOk ? "Aim for a file size, for email, Discord, WhatsApp... NooNoo picks the quality that fills it."
+    : "Only H.264, H.265, MP3, M4A and Opus can be made to fit a size. The others have a fixed quality.";
+  updateEstimate();
+}
+function autoName() {
+  const vw = ED.view, c = exportChoice();
+  if (!vw || vw.src.part) return "";
+  const stem = vw.src.title, m = vw.marks();
+  const label = m.whole ? "" : vw.label();
+  const desc = [];
+  const h = +$("#ex-height").value, fps = $("#ex-fps").value;
+  if (h && c.kind === "video" && !c.vformat.startsWith("dnxhd")) desc.push(h + "p");
+  if (fps !== "source" && c.kind === "video") desc.push(fps + " fps");
+  const mb = fitMB();
+  if (mb) desc.push(mb + " MB");
+  if (!desc.length && !label) desc.push(c.kind === "video" ? S.videoFormats[c.vformat].split(" (")[0].replace("MP4 · ", "") : (AUDIO_F.find((a) => a[0] === c.aformat) || [, "audio"])[1].replace("WAV 48k/24-bit (Avid)", "WAV 48k/24-bit"));
+  return stem + label + (desc.length ? ` (${desc.join(", ")})` : "");
+}
+function fitMB() {
+  if ($("#ex-fit").disabled || !$("#ex-fit").checked) return 0;
+  const v = parseFloat(String($("#ex-mb").value).replace(",", "."));
+  return v > 0 ? Math.round(v * 100) / 100 : 0;
+}
+// With a size to fit: how much picture that buys, and whether it'll look good
+function updateEstimate() {
+  const vw0 = ED.view;
+  $("#ex-name").placeholder = vw0 ? (vw0.src.part ? "Automatic: the title and timecode" : autoName()) : "";
+  const el = $("#ed-viewer .ed-est");
+  if (!el || !ED.view) return;
+  const vw = ED.view, c = exportChoice(), mb = fitMB(), sec = vw.seconds();
+  if (!mb || !sec) { el.textContent = ""; el.className = "ed-est"; return; }
+  const total = mb * 8000 * 0.96 / sec;
+  if (c.kind === "audio") {
+    const k = Math.floor(total);
+    el.textContent = k < 32 ? `Too small: make it at least ${Math.ceil(32 * sec / 7680 * 10) / 10} MB` : `≈ ${Math.min(k, 320)} kb/s sound${k < 96 ? " — sounds thin" : ""}`;
+    el.className = "ed-est" + (k < 32 ? " bad" : k < 96 ? " warn" : "");
+    return;
+  }
+  const a = !vw.src.isVideo || vw.src.hasAudio === false ? 0 : total > 3000 ? 160 : total > 1000 ? 128 : total > 400 ? 96 : total > 150 ? 64 : 32;
+  const kv = total - a;
+  const h0 = +$("#ex-height").value, sw = vw.src.width || 1920, sh = vw.src.height || 1080;
+  const short = Math.min(sw, sh) || 1080, k = (h0 || short) / short;
+  const fpsOut = $("#ex-fps").value === "source" ? (vw.src.fps || 30) : rate({ "23.976": "24000/1001", "29.97": "30000/1001", "59.94": "60000/1001" }[$("#ex-fps").value] || $("#ex-fps").value);
+  const bpp = (h) => kv * 1000 / ((sw * h / short) * (sh * h / short) * fpsOut);
+  const q = bpp(h0 || short);
+  if (kv < 50) { el.textContent = `Too small for ${fmt.dur(sec)}: make it at least ${Math.ceil((50 + a) * sec / 7680)} MB, or the part shorter`; el.className = "ed-est bad"; return; }
+  let tip = "";
+  if (q < 0.04) {
+    const better = HEIGHTS.map((x) => x[0]).filter((h) => h && h < (h0 || short)).find((h) => bpp(h) >= 0.06);
+    tip = better ? ` — will look blocky; try ${better}p` : " — will look blocky; try a smaller size or a shorter part";
+  }
+  el.textContent = `≈ ${Math.round(kv).toLocaleString()} kb/s picture${a ? ` + ${a} kb/s sound` : ""}${tip}`;
+  el.className = "ed-est" + (q < 0.04 ? " warn" : "");
+  void k;
+}
+$("#ex-format").addEventListener("change", (e) => { store.set("exportAs", e.target.value); syncExport(); });
+$("#ex-height").addEventListener("change", (e) => { store.set("exportHeight", +e.target.value); syncExport(); });
+$("#ex-fps").addEventListener("change", (e) => { store.set("exportFps", e.target.value); syncExport(); });
+$("#ex-fit").addEventListener("change", (e) => { store.set("exportFit", e.target.checked); syncExport(); if (e.target.checked) $("#ex-mb").focus(); });
+$("#ex-mb").addEventListener("input", (e) => { store.set("exportMB", e.target.value); syncExport(); });
+$("#ex-mb").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); exportNow(); } });
+$("#ex-name").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); exportNow(); } if (e.key === "Escape") { e.target.value = ""; e.target.blur(); } });
+async function commitExportFolder() {
+  const box = $("#ex-folder"), typed = box.value.trim();
+  const r = await api("/api/check-folder", { path: typed || S.settings.output_dir });
+  box.classList.toggle("bad", !!r.error);
+  if (r.error) { box.title = r.error; flash(r.error, 8000); return null; }
+  box.value = r.path;
+  box.title = "Exports go to " + r.path;
+  store.set("exportFolder", r.path === S.settings.output_dir ? "" : r.path);
+  return r.path;
+}
+$("#ex-folder").addEventListener("change", () => commitExportFolder().catch((e) => flash(e.message)));
+$("#ex-folder").addEventListener("blur", (e) => showPathEnd(e.target));
+$("#ex-folder").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); e.target.blur(); } });
+$("#ex-browse").addEventListener("click", async () => {
+  const box = $("#ex-folder");
+  const path = await pickFolder(box.value.trim() || S.settings.output_dir);
+  if (!path) return;
+  box.value = path;
+  await commitExportFolder().catch((e) => flash(e.message));
+});
+
+async function exportNow() {
+  const vw = ED.view;
+  if (!vw) return;
+  const c = exportChoice(), m = vw.marks();
+  if (c.kind === "video" && !vw.src.isVideo) return msgbox("Export", "This is sound only. Pick one of the Sound only formats.", { icon: "warn32" });
+  if ($("#ex-fit").checked && !$("#ex-fit").disabled && !fitMB()) return msgbox("Export", "Type the file size to fit into, in MB (such as 25 or 9.5).", { icon: "warn32" });
+  const folder = await commitExportFolder().catch((e) => (flash(e.message), null));
+  if (!folder) return;
+  const r = vw.range();
+  const spec = { kind: c.kind, vformat: c.vformat, aformat: c.aformat, height: +$("#ex-height").value || 0,
+                 fps: $("#ex-fps").value, target_mb: fitMB(), filename: $("#ex-name").value.trim() };
+  const body = vw.src.part ? { job: vw.src.part.id, start: r.start, end: r.end, spec, folder }
+    : { sid: vw.src.sid, start: m.whole ? null : r.start, end: m.whole ? null : r.end, spec, folder };
+  try {
+    await api("/api/edit/export", body);
+  } catch (e) {
+    return msgbox("Export", esc(e.message), { icon: "warn32" });
+  }
+  const as = c.kind === "video" ? S.videoFormats[c.vformat] : (AUDIO_F.find((a) => a[0] === c.aformat) || [, "audio"])[1];
+  flash(`Exporting ${m.whole && !vw.src.part ? "all of " + vw.src.title : vw.label().trim()} as ${as}${spec.target_mb ? `, to fit ${spec.target_mb} MB` : ""} → ${shortPath(folder)}. Monitor shows how it's going.`, 8000);
+  $("#ex-name").value = "";
+  poll();
+  if (vw.src.part) refreshBin(true);
+}
+$("#ed-export").addEventListener("click", exportNow);
+$("#ed-playrange").addEventListener("click", () => ED.view && ED.view.playRange());
+$("#ed-whole").addEventListener("click", () => ED.view && ED.view.clear());
+$("#ed-reveal").addEventListener("click", () => { const it = ED.cur; it && it.path && reveal(it.path); });
+function updateEditButtons() {
+  const on = !!ED.view;
+  $("#ed-export").disabled = !on;
+  $("#ed-playrange").disabled = !on;
+  $("#ed-whole").disabled = !on;
+  $("#ed-reveal").disabled = !(ED.cur && ED.cur.path && !ED.cur.missing);
+  $("#ed-export").title = ED.view && ED.view.src.part ? "Cut the part at In and Out, in the format chosen (Enter)" : "Export the frames from In to Out (Enter)";
+}
+
 // ================================================================= MONITOR
 const STATUS_LABEL = {
   queued: "Queued", starting: "Connecting", downloading: "Downloading", processing: "Processing", converting: "Converting",
   paused: "Paused", done: "Complete", error: "Failed", cancelled: "Cancelled", skipped: "Skipped",
+  trim: "Ready to trim",
 };
 const ACTIVE = new Set(["starting", "downloading", "processing", "converting"]);
 function formatLabel(j) {
@@ -1064,26 +1781,29 @@ const jobsView = new ListView($("#jobs-wrap"), "jobs", jobCols, {
   empty: "No downloads yet. Find something on the Search tab and hit Download.",
   colMenuExtra: () => thumbSizeMenu(),
   onSel: () => { updateJobButtons(); renderDetails(true); },
-  onDbl: (j) => j && (j.status === "done" ? openFile(j.filepath) : jobAction([j], j.status === "paused" || j.status === "error" ? "resume" : "pause")),
+  onDbl: (j) => j && (j.status === "done" ? openFile(j.filepath) : j.status === "trim" ? openInEdit(j)
+    : jobAction([j], j.status === "paused" || j.status === "error" ? "resume" : "pause")),
   onEnter: (sel) => sel[0] && sel[0].status === "done" && openFile(sel[0].filepath),
   onDelete: (sel) => removeJobs(sel),
   tooltip: mediaTip,
   onContext: (e, sel) => {
     const one = sel[0];
     Menu.show(e.clientX, e.clientY, [
+      ...(sel.length === 1 && one.status === "trim" ? [{ label: "Trim in Edit Tab", run: () => openInEdit(one) }, "-"] : []),
+      ...(sel.length === 1 && one.status === "done" && one.filepath ? [{ label: "Open in Edit Tab", run: () => openInEdit(one) }] : []),
       { label: "Launch", run: () => openFile(one.filepath), disabled: !(sel.length === 1 && one.status === "done") },
       { label: "Explore", run: () => api("/api/open", { what: "reveal", path: one.filepath }).catch((x) => flash(x.message)), disabled: !(sel.length === 1 && one.status === "done" && one.filepath) },
       { label: "Open Destination Folder", run: () => api("/api/open", { what: "folder", path: one.folder }).catch((x) => flash(x.message)), disabled: sel.length !== 1 || !one.folder },
       "-",
       { label: "Resume", run: () => jobAction(sel, "resume"), disabled: !sel.some((j) => ["paused", "error", "cancelled"].includes(j.status)) },
       { label: "Pause", run: () => jobAction(sel, "pause"), disabled: !sel.some((j) => ACTIVE.has(j.status) || j.status === "queued") },
-      { label: "Kill", run: () => jobAction(sel, "cancel"), disabled: !sel.some((j) => ACTIVE.has(j.status) || ["queued", "paused"].includes(j.status)) },
+      { label: "Kill", run: () => jobAction(sel, "cancel"), disabled: !sel.some((j) => ACTIVE.has(j.status) || ["queued", "paused", "trim"].includes(j.status)) },
       { label: "Retry (force re-download)", run: () => jobAction(sel, "retry"), disabled: sel.some((j) => ACTIVE.has(j.status)) },
       "-",
       { label: "Move Up", run: () => jobAction(sel, "up"), disabled: sel.length !== 1 },
       { label: "Move Down", run: () => jobAction(sel, "down"), disabled: sel.length !== 1 },
       "-",
-      { label: "Open Page in Browser", run: () => openUrl(one.url), disabled: sel.length !== 1 },
+      { label: "Open Page in Browser", run: () => openUrl(one.url), disabled: sel.length !== 1 || !one.url },
       { label: "Copy Link", run: () => copyText(sel.map((j) => j.url).join("\n")) },
       { label: "Remove From List", key: "⌫", run: () => removeJobs(sel) },
     ]);
@@ -1159,6 +1879,7 @@ async function renderDetails(selChanged) {
     <div class="d-body">
       <div class="d-title">${esc(j.title)}</div>
       <div class="d-row"><b>Status</b><span>${esc(STATUS_LABEL[j.status])}${j.stage && ACTIVE.has(j.status) ? " — " + esc(j.stage) : ""}</span></div>
+      ${j.clip_start != null ? `<div class="d-row"><b>Part</b><span>${esc(partText(j))}</span></div>` : ""}
       ${j.uploader ? `<div class="d-row"><b>Uploader</b><span>${esc(j.uploader)}</span></div>` : ""}
       <div class="d-row"><b>Format</b><span>${esc((j.quality ? j.quality + " · " : "") + formatLabel(j) + (j.fps && j.fps !== "source" && (j.kind === "video" || /^wav/.test(j.aformat)) ? " · " + j.fps + " fps" : ""))}</span></div>
       ${j.status !== "done" && j.folder ? `<div class="d-row"><b>Saving to</b><span><a class="lnk" data-folder="${esc(j.folder)}">${esc(shortPath(j.folder))}</a></span></div>` : ""}
@@ -1203,7 +1924,9 @@ async function poll() {
       S.jobVersion = st.version;
       S.jobs = st.jobs;
       renderJobs();
-    }
+      trimReady();
+      if (S.page === "edit") refreshBin(true);
+    } else if (S.page === "edit") refreshBin();
     S.stats = st;
     updateChanged(st.update);
     renderStatus();
@@ -1213,6 +1936,18 @@ async function poll() {
   } finally {
     polling = false;
   }
+}
+// A part that has just finished downloading: offer its trim window. (Ones already waiting when NooNoo
+// opened are listed in the status bar instead of all popping up at once.)
+let trimSeen = null;
+function trimReady() {
+  const now = S.jobs.filter((j) => j.status === "trim");
+  if (trimSeen === null) { trimSeen = new Set(now.map((j) => j.id)); return; }
+  const fresh = now.filter((j) => !trimSeen.has(j.id));
+  trimSeen = new Set(now.map((j) => j.id));
+  if (fresh.length) balloon(fresh.length === 1 ? "Ready to trim" : `${fresh.length} parts ready to trim`,
+    `${fresh[0].title}${fresh.length > 1 ? " and more" : ""}: click here to pick the exact first and last frames in the Edit tab.`,
+    () => openInEdit(fresh[0]));
 }
 function schedulePoll() {
   clearTimeout(pollTimer);
@@ -1306,6 +2041,8 @@ function renderStatus(err) {
   $("#sb-count").textContent = st.active;
   const badge = st.active + st.queued;
   $("#monitor-badge").textContent = badge ? badge : "";
+  $("#edit-badge").textContent = st.trim ? st.trim : "";
+  $("#edit-badge").title = st.trim ? `${st.trim} part${st.trim === 1 ? "" : "s"} ready to trim` : "";
   const sig = $(".sb-signal");
   sig.classList.toggle("on", !err && !!S.toolsOk);
   sig.classList.toggle("busy", !!st.active);
@@ -1314,12 +2051,13 @@ function renderStatus(err) {
   else if (S.flash && S.flash.until > Date.now()) text = S.flash.msg;
   else if (st.active) text = `Downloading ${st.active} file${st.active === 1 ? "" : "s"} at ${fmt.speed(st.speed) || "..."}${st.queued ? ` — ${st.queued} queued` : ""}`;
   else if (st.queued) text = `${st.queued} download${st.queued === 1 ? "" : "s"} queued`;
+  else if (st.trim) text = `${st.trim} part${st.trim === 1 ? " is" : "s are"} ready to trim in the Edit tab`;
   else if (!S.toolsOk) text = "Setting up download engine...";
   else text = "Ready. Paste a link or search for anything.";
   $("#sb-text").textContent = text;
   document.title = st.active ? `NooNoo — ${st.active} downloading` : "NooNoo";
 }
-$("#sb-text").addEventListener("click", () => showPage("monitor"));
+$("#sb-text").addEventListener("click", () => showPage(S.stats && !S.stats.active && !S.stats.queued && S.stats.trim ? "edit" : "monitor"));
 
 // ================================================================= SETTINGS
 async function loadSettings() {
@@ -1609,7 +2347,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") { Menu.close(); Tip.hide(); const top = $$("#dialogs > *").pop(); if (top && top._close) top._close(null); return; }
   if (!e.metaKey && !e.ctrlKey) return;
   const k = e.key.toLowerCase();
-  if (k === "1" || k === "2") { e.preventDefault(); showPage(["search", "monitor"][+k - 1]); }
+  if (k === "1" || k === "2" || k === "3") { e.preventDefault(); showPage(["search", "monitor", "edit"][+k - 1]); }
   else if (k === ",") { e.preventDefault(); openOptions(); }
   else if (k === "f") { e.preventDefault(); showPage("search"); $("#q").focus(); $("#q").select(); }
   else if (k === "n") { e.preventDefault(); newSearch(); }

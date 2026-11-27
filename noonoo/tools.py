@@ -65,6 +65,10 @@ def env():
     e = dict(os.environ)
     e["PATH"] = str(BIN_DIR) + os.pathsep + e.get("PATH", "")
     e["PYTHONUNBUFFERED"] = "1"
+    # Our static ffmpeg has no certificate store of its own, so it can't open https:// links (yt-dlp
+    # hands it some, e.g. for downloading part of a video) without being pointed at the Mac's.
+    if "SSL_CERT_FILE" not in e and os.path.exists("/etc/ssl/cert.pem"):
+        e["SSL_CERT_FILE"] = "/etc/ssl/cert.pem"
     return e
 
 

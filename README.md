@@ -41,8 +41,9 @@ is VP9/AV1 (most 1440p/4K YouTube), the default **MP4 · H.264** output converts
 hardware encoder so it plays everywhere.
 
 ### Editing / Avid
-**Video as** offers H.264 and two families of Avid codecs, all in .mov with 4:2:2 video at a constant
-frame rate and 24-bit 48 kHz PCM audio:
+**Video as** offers H.264, H.265, ProRes (422 Proxy, LT, 422 and HQ, for Premiere, Resolve and Final Cut)
+and two families of Avid codecs. The editing formats are all .mov with 4:2:2 video at a constant frame rate
+and 24-bit 48 kHz PCM audio:
 - **DNxHD LB / SQ / HQ**: Avid's HD codec. Always 1920×1080 at a broadcast frame rate, using Avid's
   own bitrates (36 / 115 / 175 at 23.976, 45 / 145 / 220 at 29.97, and so on). Other sizes are scaled
   to fit, with black bars for vertical or square video.
@@ -50,6 +51,53 @@ frame rate and 24-bit 48 kHz PCM audio:
 
 Pick a **Frame rate** next to Quality to conform clips to your project. For audio, **WAV 48k/24-bit
 (Avid)** is available. Turn on Options › Saving › *Plain ASCII file names* for the safest Avid media names.
+
+### Part of a video
+Type where the part starts and ends in **Part** (bottom right of Search), then press **Download** or
+**Download Audio**: `30.5`, `0:30`, `1:02:03` or timecode like `00:00:30:12`. Leave *to* empty for "to the
+end". NooNoo downloads only that stretch. Right-click a result › **Download Part...** takes you to the same
+boxes. Like File name, a part is used for one download, then the boxes empty.
+
+With *Fine-trim after* ticked, NooNoo downloads a couple of seconds either side and the part waits in the
+**Edit** tab (a balloon, a notification and a badge on the tab say so) for you to pick the exact first and last
+frames. Untick it and the part is cut at the nearest frames to the typed times.
+
+Some sites won't send just part of a video. NooNoo then downloads the whole thing and cuts the part out itself.
+
+### Edit
+Every finished download is listed in the **Edit** tab, along with parts waiting to be trimmed. **Add File...**
+brings in any other video or sound file from your Mac. The first time a file is opened, NooNoo measures every
+frame and makes a small copy to play. That takes a few seconds, or longer for long 4K videos. Exports are
+always made from the original file, which is never changed or moved.
+
+| Key | Does |
+| --- | --- |
+| Space | Play / pause |
+| J · K · L | Play backwards · stop · play forwards. Press J or L again for 2×, 4×, 8× |
+| Hold K, tap J / L | One frame back / forward |
+| ← / → | One frame (Shift: 10). Sound: 10 ms |
+| I / O (or E / R) | Mark In / Mark Out, with a still of each frame |
+| Q / W (or Home / End) | Go to In / Out |
+| G | Clear the marks (the whole clip) |
+| \\ | Play from In to Out |
+| - / = | Zoom the timeline out / in (or scroll on it) |
+| Enter | Export |
+
+Type a timecode into the box under the picture to jump there. The Out frame is included, like Avid's Mark Out.
+
+The panel at the bottom right sets what **Export** makes:
+- **Export as**: H.264 or H.265 (HEVC) MP4; ProRes 422 Proxy, LT, 422 or HQ; DNxHD or DNxHR; or sound only
+  (MP3, M4A, Opus, FLAC, WAV).
+- **Size**: the short side of the picture (1080p, 720p...), so vertical video stays vertical.
+- **Frame rate**: conforms to a project rate (frames repeated or dropped, not retimed).
+- **Fit into ... MB**: aims for a file size, for email, Discord or WhatsApp. NooNoo measures the video in a
+  first pass, then shares the bits out in a second, and tries again a little smaller if it still comes out
+  over. Under the marks it shows the bitrate that size buys, and suggests a smaller picture if it would look
+  blocky. Works with H.264, H.265, MP3, M4A and Opus. The other formats have a fixed quality.
+- **Save to** and **File name**: the name is filled in for you with the source's name, the timecode it covers
+  such as `[00.01.00.00-00.01.09.24]`, and what changed, such as `(720p, 25 MB)`.
+
+Exports run in **Monitor** like downloads, and the finished file appears in the Edit list.
 
 ### Folders
 - **Save to** (bottom right of Search) is where new downloads go. Click **Browse...**, or type or paste
@@ -134,9 +182,10 @@ tests/              security tests: python3 tests/test_security.py
 noonoo/
   __main__.py         starts the engine (--serve for the app, or opens your browser)
   spotify.py          Spotify links -> matching YouTube uploads
+  editor.py           the Edit tab's list, frame measurements and playing copies
   updater.py          update check, download + verify, install-and-relaunch helper
   server.py           localhost HTTP API (token + host checked), static UI, media streaming
-  engine.py           download queue, yt-dlp process control, progress parsing, search/probe
+  engine.py           download queue, yt-dlp process control, progress parsing, search/probe, exports
   tools.py            fetches/updates yt-dlp, ffmpeg, ffprobe, deno
   verify.py           proves updates and tools came from their publishers
   settings.py         options + defaults (~/Library/Application Support/NooNoo/settings.json)

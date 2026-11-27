@@ -244,11 +244,8 @@ class ExtraArgs(unittest.TestCase):
         try:
             saved = settings.save(settings.load())  # changing something else still works
             self.assertEqual(saved["extra_args"], "--exec calc --no-mtime")
-            job = engine.Job.__new__(engine.Job)
-            for name, value in (("url", "https://example.com/v"), ("kind", "video"), ("quality", "best"),
-                                ("vformat", "h264"), ("aformat", "mp3"), ("folder", ""), ("fps", ""),
-                                ("tags", None), ("id", "x"), ("title", "x")):
-                setattr(job, name, value)
+            job = engine.Job(url="https://example.com/v", kind="video", quality="best", vformat="h264",
+                             aformat="mp3", folder="", fps="", tags=None, title="x")
             job.log = []
             args = engine.build_args(job, saved)
             self.assertNotIn("--exec", args)
@@ -310,6 +307,47 @@ class WebServer(unittest.TestCase):
         self.assertEqual(self.request("/api/settings")[0].status, 403)
         self.assertEqual(self.request("/static/../server.py")[0].status, 404)
         self.assertEqual(self.request("/static/%2e%2e/server.py")[0].status, 404)
+
+
+    def post(self, path, body):
+        r, data = self.request(path, {"X-Token": server.TOKEN, "Content-Type": "application/json"}, "POST", json.dumps(body))
+        return r.status, json.loads(data or b"{}")
+
+    def test_edit_only_adds_media_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            secret = Path(d) / "notes.txt"
+            secret.write_text("private")
+            status, data = self.post("/api/edit/add", {"path": str(secret)})
+            self.assertEqual(status, 500)
+            self.assertIn("doesn't look like a video or sound file", data["error"])
+            status, data = self.post("/api/edit/add", {"path": str(Path(d) / "missing.mp4")})
+            self.assertEqual(status, 500)
+
+    def test_edit_serves_only_listed_files(self):
+        from noonoo import editor
+        sid = "0123456789"
+        work = editor.EDIT_DIR / sid
+        work.mkdir(parents=True, exist_ok=True)
+        (work / "preview.mp4").write_bytes(b"not on the list")
+        q = "&t=" + server.TOKEN
+        self.assertEqual(self.request("/api/edit/media?sid=%s&what=video%s" % (sid, q))[0].status, 404)
+        self.assertEqual(self.request("/api/edit/media?sid=../../x&what=video" + q)[0].status, 404)
+        self.assertEqual(self.request("/api/edit/media?sid=%s&what=info%s" % (sid, q))[0].status, 404)
+        status, data = self.post("/api/edit/export", {"sid": sid, "spec": {"kind": "video"}})
+        self.assertEqual(status, 500)
+        status, _ = self.post("/api/edit/open", {"sid": sid})
+        self.assertEqual(status, 500)
+
+    def test_edit_export_options_checked(self):
+        from noonoo import engine
+        s = settings.load()
+        for bad in ({"height": 99999}, {"fps": "1000"}, {"target_mb": -1}, {"target_mb": "lots"},
+                    {"vformat": "prores_hq", "target_mb": 10}):
+            with self.assertRaises(RuntimeError, msg=bad):
+                engine.export_options(dict({"kind": "video"}, **bad), s)
+        ok = engine.export_options({"kind": "video", "vformat": "../../etc", "filename": "a/b:c"}, s)
+        self.assertEqual(ok["vformat"], s["video_format"])
+        self.assertNotIn("/", ok["filename"])
 
 
 class DataFolder(unittest.TestCase):

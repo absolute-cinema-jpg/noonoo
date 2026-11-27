@@ -67,6 +67,34 @@
         <path d="M3 8 L5.5 6 L7.5 7.5 L10 4.5 L13 7" stroke="#9cff6a" fill="none"/>
         <path d="M5 12.5 h6 l1 2.5 h-8z" fill="#ccc" stroke="#555"/>`);
     },
+    // Edit: a clapperboard, slate open
+    edit24: () => {
+      const a = uid(), b = uid();
+      return svg(24, 24, `<defs>${lin(a, [[0, "#5a5f6a"], [1, "#1c1f26"]])}${lin(b, [[0, "#ffffff"], [1, "#c9ced8"]])}</defs>
+        <rect x="2.5" y="9" width="19" height="12.5" rx="1.2" fill="url(#${a})" stroke="#0e1014"/>
+        <path d="M5 13h14M5 16h9M5 19h11" stroke="#8fd16a" stroke-width="1.1"/>
+        <g transform="rotate(-16 3 8)"><rect x="2.5" y="4" width="19" height="4.2" rx=".8" fill="url(#${b})" stroke="#0e1014"/>
+        <path d="M5 4.2l2.6 3.8M9.6 4.2l2.6 3.8M14.2 4.2l2.6 3.8M18.8 4.2l2.2 3.2" stroke="#1c1f26" stroke-width="2"/></g>
+        <circle cx="3.3" cy="8.6" r="1.1" fill="#d8dce4" stroke="#0e1014" stroke-width=".7"/>`);
+    },
+    edit16: () => {
+      const a = uid();
+      return svg(16, 16, `<defs>${lin(a, [[0, "#5a5f6a"], [1, "#1c1f26"]])}</defs>
+        <rect x="1.5" y="6" width="13" height="8.5" rx="1" fill="url(#${a})" stroke="#0e1014"/>
+        <path d="M3.5 9h9M3.5 11.5h6" stroke="#8fd16a"/>
+        <g transform="rotate(-16 2 5.5)"><rect x="1.5" y="2.5" width="13" height="3" rx=".6" fill="#f2f4f8" stroke="#0e1014"/>
+        <path d="M3.5 2.7l1.8 2.6M7 2.7l1.8 2.6M10.5 2.7l1.8 2.6" stroke="#1c1f26" stroke-width="1.4"/></g>`);
+    },
+    // Export: a frame of film with a green arrow coming out of it
+    export32: () => {
+      const a = uid(), b = uid();
+      return svg(32, 32, `<defs>${lin(a, [[0, "#6fa8ff"], [1, "#163f9a"]], 1, 1)}${lin(b, [[0, "#b7e86b"], [1, "#3f9a12"]])}</defs>
+        <rect x="2" y="5" width="20" height="20" rx="1.5" fill="#2a2d33" stroke="#0e1014"/>
+        <path d="M3.5 7.5h2M3.5 11h2M3.5 14.5h2M3.5 18h2M3.5 21.5h2M18.5 7.5h2M18.5 11h2M18.5 14.5h2M18.5 18h2M18.5 21.5h2" stroke="#e8e8e8" stroke-width="1.6"/>
+        <rect x="7" y="7" width="10" height="16" fill="url(#${a})" stroke="#0e1014" stroke-width=".8"/>
+        <path d="M8 19l3-4 2 2 3-5" stroke="#9cff6a" stroke-width="1.1" fill="none"/>
+        <path d="M15 13.5h8v-4.5l7.5 7-7.5 7v-4.5h-8z" fill="url(#${b})" stroke="#2a6a0a" stroke-width="1.1" stroke-linejoin="round"/>`);
+    },
     folder16: () => folder(16),
     globe16: () => globe(16),
 
