@@ -28,12 +28,37 @@ if [ ! -f "$SIGNING_KEY" ] || ! git ls-files --error-unmatch "$PUBLIC_KEY" >/dev
   echo "No update key. Run ./make_update_key.sh and commit $PUBLIC_KEY first." >&2
   exit 1
 fi
-read -r -s -p "Passphrase for the update signing key: " NOONOO_SIGN_PASS; echo
+# The key's passphrase: from the Keychain once it's been saved there, otherwise asked for (and offered
+# a place in the Keychain). The key file itself stays encrypted either way.
+KEYCHAIN_ITEM="NooNoo update signing key"
+FROM_KEYCHAIN=0
+if [ -z "${NOONOO_SIGN_PASS:-}" ] && NOONOO_SIGN_PASS=$(security find-generic-password -s "$KEYCHAIN_ITEM" -a "$USER" -w 2>/dev/null); then
+  FROM_KEYCHAIN=1
+else
+  read -r -s -p "Passphrase for the update signing key: " NOONOO_SIGN_PASS; echo
+fi
 export NOONOO_SIGN_PASS
 # Catch a wrong key or passphrase now, before anything is built or bumped.
 if ! "$OPENSSL" ec -in "$SIGNING_KEY" -passin env:NOONOO_SIGN_PASS -pubout 2>/dev/null | cmp -s - "$PUBLIC_KEY"; then
-  echo "The passphrase is wrong, or that key doesn't match $PUBLIC_KEY." >&2
+  if [ "$FROM_KEYCHAIN" = 1 ]; then
+    security delete-generic-password -s "$KEYCHAIN_ITEM" -a "$USER" >/dev/null 2>&1 || true
+    echo "The passphrase saved in your Keychain doesn't open the key, so it's been removed. Run this again to type it." >&2
+  else
+    echo "The passphrase is wrong, or that key doesn't match $PUBLIC_KEY." >&2
+  fi
   exit 1
+fi
+if [ "$FROM_KEYCHAIN" = 0 ]; then
+  read -r -p "Save the passphrase in your Keychain, so releases stop asking? [Y/n] " answer
+  if [ "${answer:-y}" != "n" ] && [ "${answer:-y}" != "N" ]; then
+    # through stdin rather than the command line, so it never shows up in the process list
+    esc=$(printf '%s' "$NOONOO_SIGN_PASS" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+    printf 'add-generic-password -U -s "%s" -a "%s" -l "%s" -j "%s" -w "%s"\n' "$KEYCHAIN_ITEM" "$USER" "$KEYCHAIN_ITEM" \
+      "Passphrase for ~/.config/noonoo/update-signing-key.pem, used by NooNoo's release.sh" "$esc" | security -i >/dev/null \
+      && echo "Saved. To stop saving it: security delete-generic-password -s \"$KEYCHAIN_ITEM\"" \
+      || echo "Couldn't save it to the Keychain; releases will keep asking." >&2
+    unset esc
+  fi
 fi
 FEED=$(python3 -c "import re; print(re.search(r'FEED_REPO = \"([^\"]+)\"', open('noonoo/updater.py').read()).group(1))")
 SOURCE=$(gh repo view --json nameWithOwner --jq .nameWithOwner)

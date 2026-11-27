@@ -155,7 +155,10 @@ password manager: without them you can't sign updates, and everyone would have t
 ./release.sh 1.0.3
 ```
 This bumps the version, builds and signs the Apple Silicon and Intel apps, tags and pushes, and publishes
-the release on GitHub. Release notes come from the commit messages since
+the release on GitHub. The first time, it asks for the signing key's passphrase and offers to save it in your
+Keychain (as "NooNoo update signing key"), so later releases don't ask. The key file stays encrypted. Anything
+running as you can read a saved passphrase through macOS's `security` tool, just as it can your other saved
+items. To go back to typing it: `security delete-generic-password -s "NooNoo update signing key"`. Release notes come from the commit messages since
 the last release; to write your own, pass a notes file: `./release.sh 1.0.3 notes.md`. The script refuses to run with uncommitted changes.
 
 ### Extra yt-dlp arguments
